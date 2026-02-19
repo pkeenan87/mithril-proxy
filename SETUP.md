@@ -226,6 +226,12 @@ Each log line contains:
 | `status_code` | Upstream HTTP status code |
 | `latency_ms` | Round-trip latency in milliseconds |
 | `error` | Exception message (only present on errors) |
+| `rpc_id` | JSON-RPC `id` field from the request or response (omitted when not present) |
+| `request_body` | Full JSON-RPC request payload as a string (omitted when `AUDIT_LOG_BODIES=false`) |
+| `response_body` | Full upstream response payload as a string (omitted when `AUDIT_LOG_BODIES=false`) |
+| `truncated` | `true` when a body field was cut at the 32 KB limit (omitted otherwise) |
+
+> **Security note:** Enabling audit body logging (`AUDIT_LOG_BODIES=true`, which is the default) persists full request and response payloads to disk. These may include sensitive tool arguments, API responses, or user data. Restrict log file permissions accordingly and rotate logs regularly.
 
 ---
 
@@ -268,6 +274,13 @@ Common causes: missing API key in `secrets.yml`, or the npm package needs updati
 {"error": "Too many active connections for 'context7' (max 10)"}
 ```
 Each SSE client connection spawns its own subprocess. The default cap is 10 per destination. Override with `MAX_STDIO_CONNECTIONS=<n>` in `/etc/mithril-proxy/env`.
+
+**Disabling audit body logging**
+By default the proxy writes the full request and response JSON-RPC payloads to the log file. To disable this (e.g. for privacy or disk-space reasons), set `AUDIT_LOG_BODIES=false` in `/etc/mithril-proxy/env`:
+```
+AUDIT_LOG_BODIES=false
+```
+With this flag set, `request_body` and `response_body` fields are omitted from every log line. The `rpc_id`, `mcp_method`, and all other fields are still logged.
 
 **Port 3000 already in use**
 Edit the `ExecStart` line in `/etc/systemd/system/mithril-proxy.service` to use a different port, then:

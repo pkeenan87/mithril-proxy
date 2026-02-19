@@ -273,13 +273,16 @@ async def handle_message(
     start = time.monotonic()
 
     body = await request.body()
+    request_body_str = body.decode(errors="replace")
 
-    # Extract MCP method from JSON-RPC body for logging
+    # Extract MCP method and rpc_id from JSON-RPC body for logging
     mcp_method: Optional[str] = None
+    rpc_id = None
     try:
         import json
         payload = json.loads(body)
         mcp_method = payload.get("method")
+        rpc_id = payload.get("id")
     except Exception:
         pass
 
@@ -297,6 +300,7 @@ async def handle_message(
             )
             status_code = upstream_response.status_code
             response_body = upstream_response.content
+            response_body_str = response_body.decode(errors="replace")
             response_headers = dict(upstream_response.headers)
             # Strip hop-by-hop headers
             for h in ("transfer-encoding", "connection", "keep-alive"):
@@ -313,6 +317,8 @@ async def handle_message(
             status_code=status_code,
             latency_ms=latency_ms,
             error=error_msg,
+            rpc_id=rpc_id,
+            request_body=request_body_str,
         )
         return JSONResponse(
             status_code=502,
@@ -328,6 +334,9 @@ async def handle_message(
         status_code=status_code,
         latency_ms=latency_ms,
         error=error_msg,
+        rpc_id=rpc_id,
+        request_body=request_body_str,
+        response_body=response_body_str,
     )
 
     return Response(

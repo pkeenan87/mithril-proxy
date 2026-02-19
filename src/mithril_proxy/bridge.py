@@ -160,6 +160,8 @@ async def _spawn_process(
 async def _stdout_reader(
     process: asyncio.subprocess.Process,
     out_queue: asyncio.Queue,
+    destination: str,
+    session_id: str,
 ) -> None:
     """Read stdout lines from process, enqueue formatted SSE data chunks.
 
@@ -170,6 +172,22 @@ async def _stdout_reader(
             line = await process.stdout.readline()
             if not line:
                 break
+            line_str = line.rstrip(b"\n").decode(errors="replace")
+            rpc_id = None
+            try:
+                rpc_id = json.loads(line_str).get("id")
+            except Exception:
+                pass
+            log_request(
+                user="stdio",
+                source_ip="localhost",
+                destination=destination,
+                mcp_method=None,
+                status_code=200,
+                latency_ms=0.0,
+                rpc_id=rpc_id,
+                response_body=line_str,
+            )
             await out_queue.put(b"data: " + line.rstrip(b"\n") + b"\n\n")
     finally:
         await out_queue.put(None)
@@ -374,7 +392,7 @@ async def handle_stdio_sse(
                 out_queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
 
                 stdout_task = asyncio.create_task(
-                    _stdout_reader(current_process, out_queue)
+                    _stdout_reader(current_process, out_queue, destination, session_id)
                 )
                 stdin_task = asyncio.create_task(
                     _stdin_writer(current_process, session.stdin_queue)
@@ -518,6 +536,28 @@ async def handle_stdio_message(
         )
 
     body = await request.body()
+
+    # Extract MCP method and rpc_id for logging
+    mcp_method: Optional[str] = None
+    rpc_id = None
+    try:
+        payload = json.loads(body)
+        mcp_method = payload.get("method")
+        rpc_id = payload.get("id")
+    except Exception:
+        pass
+
+    log_request(
+        user="stdio",
+        source_ip="localhost",
+        destination=destination,
+        mcp_method=mcp_method,
+        status_code=202,
+        latency_ms=0.0,
+        rpc_id=rpc_id,
+        request_body=body.decode(errors="replace"),
+        response_body=None,
+    )
 
     # JSON-RPC over stdio requires newline-terminated frames
     if not body.endswith(b"\n"):

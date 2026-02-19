@@ -13,6 +13,9 @@ from typing import Any, Optional
 _LOG_FILE_ENV = "LOG_FILE"
 _DEFAULT_LOG_FILE = Path("/var/log/mithril-proxy/proxy.log")
 
+_AUDIT_LOG_BODIES_ENV = "AUDIT_LOG_BODIES"
+_AUDIT_MAX_BYTES = 32_768  # 32 KB
+
 # Thread lock so concurrent requests don't interleave JSON lines
 _write_lock = threading.Lock()
 
@@ -44,6 +47,10 @@ class _JsonFormatter(logging.Formatter):
             payload["exc_info"] = self.formatException(record.exc_info)
 
         return json.dumps(payload, default=str)
+
+
+def _audit_enabled() -> bool:
+    return os.environ.get(_AUDIT_LOG_BODIES_ENV, "true").lower() not in ("false", "0", "no")
 
 
 def _resolve_log_path() -> Path:
@@ -85,6 +92,9 @@ def log_request(
     status_code: int,
     latency_ms: float,
     error: Optional[str] = None,
+    rpc_id=None,
+    request_body: Optional[str] = None,
+    response_body: Optional[str] = None,
 ) -> None:
     """Write one structured JSON log line for a proxied request."""
     logger = get_logger()
@@ -98,6 +108,18 @@ def log_request(
     }
     if error is not None:
         extra["error"] = error
+
+    if rpc_id is not None:
+        extra["rpc_id"] = rpc_id
+
+    if _audit_enabled():
+        for field_name, value in (("request_body", request_body), ("response_body", response_body)):
+            if value is not None:
+                if len(value) > _AUDIT_MAX_BYTES:
+                    extra[field_name] = value[:_AUDIT_MAX_BYTES]
+                    extra["truncated"] = True
+                else:
+                    extra[field_name] = value
 
     with _write_lock:
         logger.info("request", extra=extra)
