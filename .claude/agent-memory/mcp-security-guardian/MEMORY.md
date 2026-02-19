@@ -53,6 +53,44 @@
   write access to its own virtualenv and source. A compromise of the process allows
   modifying installed Python packages for persistence.
 
+## Confirmed Vulnerability Patterns (stdio bridge, 2026-02-19)
+
+### Duplicate import in proxy.py
+- `from .config import get_destination, get_destination_url` appears TWICE on consecutive
+  lines (proxy.py:15-16). Cosmetic but introduced by the diff; should be deduplicated.
+
+### No subprocess cap (DoS)
+- `bridge.py`: every SSE connection spawns its own subprocess with no max-connections check.
+  An attacker can open N connections to exhaust process table, file descriptors, or memory.
+  Pattern: need a per-destination semaphore or global cap before `_spawn_process`.
+
+### Full os.environ inheritance (secrets leakage)
+- `_spawn_process` (bridge.py:117): `env = {**os.environ, **extra_env}` passes ALL parent
+  env vars (including DATABASE_URL, AWS credentials, dotenv-loaded secrets) to child.
+  Subprocess stdout/stderr is attached; any of those vars printed to stderr leak into logs.
+  Pattern: build a clean minimal env (PATH, HOME, USER, LANG, TMPDIR) and merge only
+  explicitly declared vars.
+
+### shlex.split on YAML-controlled string (command injection surface)
+- `shlex.split(command)` is called on a YAML-controlled string (bridge.py:116, 100).
+  shlex itself does not execute a shell, but glob characters and path separators in the
+  first token pass through to execv unchanged. validate_stdio_commands checks only that
+  the executable exists on PATH; it does NOT prevent trailing shell metacharacters injected
+  via config (e.g. `npx; rm -rf /`). Since YAML is operator-controlled this is lower
+  severity than true user-controlled injection, but CI pipelines that auto-apply PR config
+  changes are vulnerable.
+  Pattern: allowlist executable basenames; reject any command containing shell metacharacters.
+
+### Session ID not validated in handle_stdio_message (cross-session hijack)
+- `handle_stdio_message` (bridge.py:448) receives session_id directly from
+  `request.query_params` with no format check. Any client that knows or guesses a UUID
+  can write to another client's subprocess stdin. UUIDs are not secret (they're sent in
+  the SSE endpoint event). No ownership check ties the session to the originating connection.
+  Pattern: bind session to source IP or an opaque bearer token at registration time.
+
+### Duplicate import line in proxy.py
+- proxy.py lines 15-16 import `get_destination, get_destination_url` twice.
+
 ## Patterns To Reuse
 
 - Always validate session IDs against a strict regex `^[A-Za-z0-9_-]{8,128}$` before
@@ -63,5 +101,9 @@
 - For SSE proxying: validate each line prefix against the SSE spec set
   `{event:, data:, id:, retry:, :}` and discard or escape anything else.
 - Always add `detail` field only in development mode; gate on an env flag.
+- For subprocess spawning: use a clean minimal env (PATH, HOME, USER, LANG, TMPDIR) as
+  base; never inherit full os.environ. Use a semaphore to cap concurrent subprocesses.
+- session_id from query params must be validated (UUID regex) AND ownership-checked before
+  being used to look up another connection's subprocess.
 
 See `patterns.md` for extended notes.

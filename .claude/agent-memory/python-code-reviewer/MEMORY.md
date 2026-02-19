@@ -1,8 +1,9 @@
 # Python Code Reviewer — Project Memory
 
 ## Project: mithril-proxy
-SSE/MCP proxy server. Python 3.11+, FastAPI, uvicorn, httpx, PyYAML.
+SSE/MCP proxy server. Python **3.9.6** (venv confirmed 2026-02-19), FastAPI, uvicorn, httpx, PyYAML.
 Runs as a systemd service on a Raspberry Pi (single-process, single event loop).
+IMPORTANT: Python 3.9, not 3.11+. asyncio.Lock() binds to running loop on 3.9 — avoid module-level or lazy construction outside a loop.
 
 **Key files:**
 - `src/mithril_proxy/config.py` — YAML config loader, module-level `_destinations` dict
@@ -49,11 +50,28 @@ drop all lines except the last one parsed per event. The `data_lines` list is a 
 Minor anti-pattern. `json` is stdlib; move to top-level imports.
 
 ## Recurring Anti-Patterns in This Codebase
-- Module-level mutable globals (`_destinations`, `_session_map`, `_logger`) create test
-  isolation problems when tests share the same process. Tests in `test_logging.py` work
-  around this manually by saving/restoring `_logger`; `_session_map` has no such guard.
+- Module-level mutable globals (`_destinations`, `_session_map`, `_logger`, `_stdio_sessions`)
+  create test isolation problems. Tests now have `reset_bridge_state` autouse fixture that
+  clears `bridge._stdio_sessions` and resets `bridge._stdio_lock = None` between tests.
 - Bare `except Exception: pass` in `handle_message` (proxy.py line 272) silently drops
   JSON decode errors and type errors from `payload.get("method")`.
+- `active_tasks = []` reset before `asyncio.gather` completes — recurring pattern that
+  creates a task-leak window if GeneratorExit fires during gather. Always keep the full
+  task list available in the finally block.
+
+## New Files Added (2026-02-19 review)
+- `src/mithril_proxy/bridge.py` — stdio-to-SSE bridge: subprocess lifecycle, 3-task model,
+  restart loop (up to 3 retries), session registry with lazy asyncio.Lock
+- `src/mithril_proxy/secrets.py` — secrets loader for config/secrets.yml (gitignored)
+- `tests/test_bridge.py` — 13 new tests; all pass on Python 3.9.6
+
+## Key Open Issues After Second Review (2026-02-19)
+1. Task leak: `active_tasks = []` before `gather` completes (bridge.py ~line 341)
+2. `asyncio.Lock` lazy construction in `_get_lock()` — unsafe on Python 3.9 outside event loop
+3. Dead import: `get_destination_url` in proxy.py line 15 — no longer used in proxy.py
+4. `_drain_stdout_task` annotation `-> AsyncGenerator[bytes, None]` is misleading (should be `AsyncIterator[bytes]` or no return annotation)
+5. `_stdin_writer` does not catch bare `OSError` — only `BrokenPipeError`, `ConnectionResetError`
+6. Unbounded stdin/stdout queues — memory risk on Pi under high load
 
 ## See Also
 - `patterns.md` — detailed fix snippets for the retry loop
