@@ -15,6 +15,14 @@ A minimal MCP-over-SSE proxy that sits between your MCP clients (Claude Desktop,
 sudo apt update && sudo apt install -y python3 python3-venv python3-pip rsync git
 ```
 
+If you plan to use **stdio MCP servers** that are distributed via npm (e.g. context7, GitHub MCP), Node.js is also required:
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_lts.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version && npx --version
+```
+
 ---
 
 ## Installation
@@ -38,21 +46,70 @@ The script:
 
 ## Configure Destinations
 
-Edit `/etc/mithril-proxy/destinations.yml`:
+Edit `/etc/mithril-proxy/destinations.yml`. There are two destination types.
+
+### SSE destinations (remote HTTP server)
+
+The proxy forwards SSE traffic to an upstream HTTP server:
 
 ```yaml
 destinations:
   github:
+    type: sse          # optional — 'sse' is the default
     url: https://mcp.example.com/github
-
-  my-local-server:
-    url: http://192.168.1.50:8080
 ```
 
-Each key becomes the URL path segment your clients connect to:
-`GET http://<pi-ip>:3000/github/sse`
+### stdio destinations (local process)
+
+The proxy spawns a local subprocess and bridges its stdin/stdout as SSE. Each client connection gets its own subprocess instance.
+
+```yaml
+destinations:
+  context7:
+    type: stdio
+    command: npx -y @upstash/context7-mcp
+```
+
+> **First connection note:** `npx` downloads the package on first run, which can take 15–30 seconds. Subsequent connections use the npm cache and start immediately.
+
+Each destination key becomes the URL path segment clients connect to:
+`GET http://<pi-ip>:3000/context7/sse`
 
 After editing:
+
+```bash
+sudo systemctl restart mithril-proxy
+```
+
+---
+
+## API Keys for stdio destinations
+
+API keys and other secrets for stdio subprocesses go in `/etc/mithril-proxy/secrets.yml`. This file is separate from `destinations.yml` so secrets stay out of version control.
+
+Create or edit `/etc/mithril-proxy/secrets.yml`:
+
+```yaml
+context7:
+  CONTEXT7_API_KEY: your-api-key-here
+```
+
+Each top-level key matches a destination name. The values are injected as environment variables into that destination's subprocess — they are never written to logs or forwarded to clients.
+
+Make the file readable only by the `mithril` user:
+
+```bash
+sudo chmod 600 /etc/mithril-proxy/secrets.yml
+sudo chown mithril:mithril /etc/mithril-proxy/secrets.yml
+```
+
+Then tell the proxy where to find it by adding to `/etc/mithril-proxy/env`:
+
+```
+SECRETS_CONFIG=/etc/mithril-proxy/secrets.yml
+```
+
+Restart to apply:
 
 ```bash
 sudo systemctl restart mithril-proxy
@@ -82,7 +139,11 @@ sudo tail -f /var/log/mithril-proxy/proxy.log | jq
 
 ## Client Configuration
 
-The proxy passes the client's `Authorization: Bearer <token>` header through to the upstream MCP server unchanged. The client's token is **never stored** by the proxy — it is forwarded as-is.
+Replace `192.168.1.10` with your Raspberry Pi's IP address in all examples below.
+
+For **SSE destinations**, the proxy forwards the client's `Authorization: Bearer <token>` header to the upstream unchanged. The token is never stored by the proxy.
+
+For **stdio destinations**, the API key is injected by the proxy from `secrets.yml` — no `Authorization` header is needed in the client config.
 
 ### Claude Desktop (`claude_desktop_config.json`)
 
@@ -94,12 +155,14 @@ The proxy passes the client's `Authorization: Bearer <token>` header through to 
       "headers": {
         "Authorization": "Bearer YOUR_UPSTREAM_TOKEN_HERE"
       }
+    },
+    "context7": {
+      "type": "sse",
+      "url": "http://192.168.1.10:3000/context7/sse"
     }
   }
 }
 ```
-
-Replace `192.168.1.10` with your Raspberry Pi's IP address, and `github` with the destination name you configured in `destinations.yml`.
 
 ### Cursor (`.cursor/mcp.json`)
 
@@ -111,6 +174,9 @@ Replace `192.168.1.10` with your Raspberry Pi's IP address, and `github` with th
       "headers": {
         "Authorization": "Bearer YOUR_UPSTREAM_TOKEN_HERE"
       }
+    },
+    "context7": {
+      "url": "http://192.168.1.10:3000/context7/sse"
     }
   }
 }
@@ -120,9 +186,16 @@ Replace `192.168.1.10` with your Raspberry Pi's IP address, and `github` with th
 
 ## Adding a New Destination
 
-1. Edit `/etc/mithril-proxy/destinations.yml` and add the new entry
-2. Restart the service: `sudo systemctl restart mithril-proxy`
-3. Update your MCP client config to point to `http://<pi-ip>:3000/<new-name>/sse`
+**SSE destination:**
+1. Add the entry to `/etc/mithril-proxy/destinations.yml`
+2. Restart: `sudo systemctl restart mithril-proxy`
+3. Point your client to `http://<pi-ip>:3000/<name>/sse` with an `Authorization` header
+
+**stdio destination (e.g. an npm MCP server):**
+1. Add the entry to `/etc/mithril-proxy/destinations.yml` with `type: stdio` and `command:`
+2. If the server requires an API key, add it to `/etc/mithril-proxy/secrets.yml`
+3. Restart: `sudo systemctl restart mithril-proxy`
+4. Point your client to `http://<pi-ip>:3000/<name>/sse` — no `Authorization` header needed
 
 ---
 
@@ -176,6 +249,25 @@ Ensure `/var/log/mithril-proxy/` exists and is owned by the `mithril` user:
 sudo mkdir -p /var/log/mithril-proxy
 sudo chown mithril:mithril /var/log/mithril-proxy
 ```
+
+**stdio destination fails to start — executable not found**
+```
+ValueError: stdio destination 'context7': command executable 'npx' not found on PATH
+```
+The proxy validates all stdio commands at startup. Install Node.js (see Prerequisites) and confirm `which npx` succeeds as the `mithril` user.
+
+**stdio subprocess exits immediately / reconnects loop**
+The subprocess crashed before producing any output. Check the proxy log for `subprocess stderr` entries:
+```bash
+sudo tail -f /var/log/mithril-proxy/proxy.log | jq 'select(.stderr_line != null)'
+```
+Common causes: missing API key in `secrets.yml`, or the npm package needs updating (`npx -y` will re-download on next connection).
+
+**Too many connections error (503)**
+```json
+{"error": "Too many active connections for 'context7' (max 10)"}
+```
+Each SSE client connection spawns its own subprocess. The default cap is 10 per destination. Override with `MAX_STDIO_CONNECTIONS=<n>` in `/etc/mithril-proxy/env`.
 
 **Port 3000 already in use**
 Edit the `ExecStart` line in `/etc/systemd/system/mithril-proxy.service` to use a different port, then:

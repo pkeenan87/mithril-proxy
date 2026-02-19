@@ -1,4 +1,4 @@
-# mithril-proxy
+# Mithril Proxy
 
               * . * . *
           .  ___________  .
