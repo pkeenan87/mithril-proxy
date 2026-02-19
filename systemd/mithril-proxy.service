@@ -1,0 +1,15 @@
+[Unit]
+Description=Mithril MCP Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=mithril
+WorkingDirectory=/opt/mithril-proxy
+ExecStart=/opt/mithril-proxy/venv/bin/uvicorn mithril_proxy.main:app --host 0.0.0.0 --port 3000
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/etc/mithril-proxy/env
+
+[Install]
+WantedBy=multi-user.target
