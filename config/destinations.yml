@@ -1,12 +1,19 @@
-# Destination name → upstream MCP server URL
+# Destination name → upstream MCP server
 # The name becomes the URL path segment: GET /{name}/sse
 #
-# Example:
+# --- SSE destination (remote HTTP server) ---
 # github:
+#   type: sse          # optional, 'sse' is the default
 #   url: https://mcp.example.com/github
 #
-# my-server:
-#   url: http://192.168.1.50:8080
+# --- stdio destination (local process) ---
+# context7:
+#   type: stdio
+#   command: npx -y @upstash/context7-mcp
+#   env:                         # optional inline env vars (not for secrets)
+#     SOME_VAR: value
+#
+# Secrets (API keys etc.) belong in config/secrets.yml, which is gitignored.
 
 # destinations:
 #   example:

@@ -33,3 +33,6 @@ env/
 
 # Local log output
 _logs/
+
+# Per-destination secrets (env vars for stdio subprocesses)
+config/secrets.yml
