@@ -10,18 +10,29 @@ from fastapi import FastAPI, Request
 load_dotenv()
 from fastapi.responses import JSONResponse
 
-from .config import load_config
+from .bridge import init_bridge, shutdown_all_stdio, validate_stdio_commands
+from .config import get_stdio_destinations, load_config
 from .logger import setup_logging
 from .proxy import handle_message, handle_sse
+from .secrets import load_secrets
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: load config and initialise logging (fail-fast on bad config)
+    # Startup order matters:
+    # 1. load_config  — required by validate_stdio_commands
+    # 2. load_secrets — required by subprocess env injection; must precede validation
+    # 3. setup_logging — needs config for log path
+    # 4. init_bridge  — creates asyncio.Lock inside the running event loop
+    # 5. validate     — fail-fast executable check with secrets available
     load_config()
+    load_secrets()
     setup_logging()
+    init_bridge()
+    validate_stdio_commands(get_stdio_destinations())
     yield
-    # Shutdown: nothing to clean up currently
+    # Shutdown: terminate all managed stdio subprocesses
+    await shutdown_all_stdio()
 
 
 app = FastAPI(title="mithril-proxy", lifespan=lifespan)

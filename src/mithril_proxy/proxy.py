@@ -12,7 +12,7 @@ import httpx
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from .config import get_destination_url
+from .config import get_destination
 from .logger import log_request
 
 # --------------------------------------------------------------------------- #
@@ -117,12 +117,20 @@ def _rewrite_endpoint_event(
 
 
 async def handle_sse(request: Request, destination: str) -> Response:
-    upstream_base = get_destination_url(destination)
-    if upstream_base is None:
+    dest_config = get_destination(destination)
+    if dest_config is None:
         return JSONResponse(
             status_code=404,
             content={"error": f"Unknown destination: {destination}"},
         )
+
+    if dest_config.type == "stdio":
+        from .bridge import handle_stdio_sse
+        from .secrets import get_destination_env
+        subprocess_env = {**dest_config.env, **get_destination_env(destination)}
+        return await handle_stdio_sse(request, destination, dest_config, subprocess_env)
+
+    upstream_base = dest_config.url
 
     upstream_url = f"{upstream_base}/sse"
     headers = _upstream_headers(request)
@@ -234,8 +242,8 @@ async def handle_message(
     request: Request,
     destination: str,
 ) -> Response:
-    upstream_base = get_destination_url(destination)
-    if upstream_base is None:
+    dest_config = get_destination(destination)
+    if dest_config is None:
         return JSONResponse(
             status_code=404,
             content={"error": f"Unknown destination: {destination}"},
@@ -247,6 +255,10 @@ async def handle_message(
             status_code=400,
             content={"error": "Missing session_id query parameter"},
         )
+
+    if dest_config.type == "stdio":
+        from .bridge import handle_stdio_message
+        return await handle_stdio_message(request, destination, session_id)
 
     upstream_url = await _get_session_url(session_id)
     if upstream_url is None:

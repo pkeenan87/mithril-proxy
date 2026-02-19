@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +12,15 @@ import yaml
 _CONFIG_PATH_ENV = "DESTINATIONS_CONFIG"
 _DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "destinations.yml"
 
-_destinations: dict[str, str] = {}
+_destinations: dict[str, DestinationConfig] = {}
+
+
+@dataclass
+class DestinationConfig:
+    type: str = "sse"
+    url: Optional[str] = None
+    command: Optional[str] = None
+    env: dict[str, str] = field(default_factory=dict)
 
 
 def _resolve_config_path() -> Path:
@@ -55,30 +64,93 @@ def load_config(path: Optional[Path] = None) -> None:
             f"{config_path}: 'destinations' must be a mapping of name → {{url: ...}}."
         )
 
-    parsed: dict[str, str] = {}
+    parsed: dict[str, DestinationConfig] = {}
     for name, entry in destinations_raw.items():
         if isinstance(entry, str):
-            url = entry
+            # Flat string URL — treat as SSE destination
+            url = entry.strip()
+            if not url:
+                raise ValueError(
+                    f"{config_path}: destination '{name}' has an empty URL."
+                )
+            parsed[name] = DestinationConfig(type="sse", url=url.rstrip("/"))
+
         elif isinstance(entry, dict):
-            url = entry.get("url", "")
+            dest_type = entry.get("type", "sse")
+
+            if dest_type not in ("sse", "stdio"):
+                raise ValueError(
+                    f"{config_path}: destination '{name}' has unknown type '{dest_type}'. "
+                    "Accepted values: 'sse', 'stdio'."
+                )
+
+            env_block = entry.get("env", {})
+            if not isinstance(env_block, dict):
+                raise ValueError(
+                    f"{config_path}: destination '{name}' env must be a mapping."
+                )
+            # Coerce YAML-parsed values (ints, bools, etc.) to strings
+            env_dict = {k: str(v) for k, v in env_block.items()}
+
+            if dest_type == "sse":
+                url = entry.get("url", "")
+                if not isinstance(url, str) or not url.strip():
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' (type: sse) requires a non-empty 'url'."
+                    )
+                parsed[name] = DestinationConfig(
+                    type="sse",
+                    url=url.strip().rstrip("/"),
+                    env=env_dict,
+                )
+
+            else:  # stdio
+                command = entry.get("command", "")
+                if not isinstance(command, str) or not command.strip():
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' (type: stdio) requires a non-empty 'command'."
+                    )
+                command = command.strip()
+                # Reject shell metacharacters that could enable injection.
+                # shlex.split is used (not a shell), but semicolons, pipes, etc.
+                # in the config still indicate a misconfigured or malicious entry.
+                _SHELL_METACHARS = set(";&|$<>()`\n\r")
+                bad = _SHELL_METACHARS.intersection(command)
+                if bad:
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' command contains "
+                        f"disallowed characters: {sorted(bad)}"
+                    )
+                parsed[name] = DestinationConfig(
+                    type="stdio",
+                    command=command,
+                    env=env_dict,
+                )
+
         else:
             raise ValueError(
-                f"{config_path}: destination '{name}' must be a string URL or a mapping with a 'url' key."
+                f"{config_path}: destination '{name}' must be a string URL or a mapping."
             )
-
-        if not isinstance(url, str) or not url.strip():
-            raise ValueError(
-                f"{config_path}: destination '{name}' has an empty or invalid URL."
-            )
-
-        parsed[name] = url.rstrip("/")
 
     _destinations = parsed
 
 
-def get_destination_url(name: str) -> Optional[str]:
-    """Return the upstream URL for *name*, or None if unknown."""
+def get_destination(name: str) -> Optional[DestinationConfig]:
+    """Return the DestinationConfig for *name*, or None if unknown."""
     return _destinations.get(name)
+
+
+def get_destination_url(name: str) -> Optional[str]:
+    """Return the upstream URL for *name*, or None if unknown or stdio type."""
+    dest = _destinations.get(name)
+    if dest is None or dest.type != "sse":
+        return None
+    return dest.url
+
+
+def get_stdio_destinations() -> dict[str, DestinationConfig]:
+    """Return all stdio-type destinations."""
+    return {n: d for n, d in _destinations.items() if d.type == "stdio"}
 
 
 def destination_names() -> list[str]:
