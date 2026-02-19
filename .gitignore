@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# pytest
+.pytest_cache/
+
+# Environment / secrets
+.env
+*.env
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# python .venv
+.venv/
