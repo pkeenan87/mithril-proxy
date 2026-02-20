@@ -5,6 +5,7 @@ set -euo pipefail
 INSTALL_DIR=/opt/mithril-proxy
 CONFIG_DIR=/etc/mithril-proxy
 LOG_DIR=/var/log/mithril-proxy
+CACHE_DIR=/var/cache/mithril-proxy
 SERVICE_NAME=mithril-proxy
 SERVICE_USER=mithril
 
@@ -47,6 +48,13 @@ mkdir -p "$LOG_DIR"
 chown "$SERVICE_USER:$SERVICE_USER" "$LOG_DIR"
 
 # --------------------------------------------------------------------------- #
+# 4b. npm cache directory (used by npx in stdio destinations)
+# --------------------------------------------------------------------------- #
+echo "[+] Creating npm cache directory $CACHE_DIR..."
+mkdir -p "$CACHE_DIR/.npm"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$CACHE_DIR"
+
+# --------------------------------------------------------------------------- #
 # 5. Config directory + env file
 # --------------------------------------------------------------------------- #
 echo "[+] Setting up config directory $CONFIG_DIR..."
@@ -58,6 +66,8 @@ if [ ! -f "$ENV_FILE" ]; then
 # mithril-proxy environment configuration
 LOG_FILE=/var/log/mithril-proxy/proxy.log
 DESTINATIONS_CONFIG=/etc/mithril-proxy/destinations.yml
+PYTHONPATH=/opt/mithril-proxy/src
+NPM_CONFIG_CACHE=/var/cache/mithril-proxy/.npm
 EOF
     echo "[+] Created $ENV_FILE with defaults."
 else

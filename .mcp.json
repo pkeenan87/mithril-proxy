@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "context7": {
+      "type": "sse",
+      "url": "http://192.168.1.252:3000/context7/sse"
+    }
+  }
+}

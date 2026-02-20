@@ -16,5 +16,6 @@
 # Secrets (API keys etc.) belong in config/secrets.yml, which is gitignored.
 
 # destinations:
-#   example:
-#     url: https://mcp.example.com
+#   context7:
+#     type: stdio
+#     command: npx -y @upstash/context7-mcp

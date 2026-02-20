@@ -32,6 +32,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .logger import get_logger, log_request
+from .utils import source_ip as _source_ip
 
 if TYPE_CHECKING:
     from .config import DestinationConfig
@@ -52,6 +53,7 @@ _SAFE_ENV_KEYS = frozenset({
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE",
     "TMPDIR", "TEMP", "TMP", "TERM", "SHELL",
     "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+    "NPM_CONFIG_CACHE",
 })
 
 # UUID v4 format — used to validate session_id before lookup
@@ -549,7 +551,7 @@ async def handle_stdio_message(
 
     log_request(
         user="stdio",
-        source_ip="localhost",
+        source_ip=_source_ip(request),
         destination=destination,
         mcp_method=mcp_method,
         status_code=202,

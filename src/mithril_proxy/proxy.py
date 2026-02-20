@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import get_destination
 from .logger import log_request
+from .utils import source_ip as _source_ip
 
 # --------------------------------------------------------------------------- #
 #  Session map: session_id → upstream message URL                             #
@@ -49,14 +50,6 @@ def _user_from_request(request: Request) -> str:
         return token[:8] if token else "anonymous"
     return "anonymous"
 
-
-def _source_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    if request.client:
-        return request.client.host
-    return "unknown"
 
 
 # --------------------------------------------------------------------------- #
