@@ -117,6 +117,22 @@ sudo systemctl restart mithril-proxy
 
 ---
 
+## Environment Variable Reference
+
+All variables go in `/etc/mithril-proxy/env` (created by `install.sh`).
+
+| Variable | Default | Description |
+|---|---|---|
+| `LOG_FILE` | `/var/log/mithril-proxy/proxy.log` | Path to the JSON request log |
+| `DESTINATIONS_CONFIG` | `/etc/mithril-proxy/destinations.yml` | Path to destinations config |
+| `SECRETS_CONFIG` | *(none)* | Path to secrets.yml; omit if not using stdio destinations with API keys |
+| `PYTHONPATH` | `/opt/mithril-proxy/src` | Required for Python to find the `mithril_proxy` package |
+| `NPM_CONFIG_CACHE` | `/var/cache/mithril-proxy/.npm` | npm cache directory for `npx`-based stdio destinations |
+| `MAX_STDIO_CONNECTIONS` | `10` | Max concurrent SSE clients per stdio destination |
+| `AUDIT_LOG_BODIES` | `true` | Set to `false` to omit `request_body`/`response_body` from logs |
+
+---
+
 ## Service Management
 
 ```bash
@@ -268,6 +284,15 @@ The subprocess crashed before producing any output. Check the proxy log for `sub
 sudo tail -f /var/log/mithril-proxy/proxy.log | jq 'select(.stderr_line != null)'
 ```
 Common causes: missing API key in `secrets.yml`, or the npm package needs updating (`npx -y` will re-download on next connection).
+
+**npx fails with `EACCES` / permission denied on `/home/mithril`**
+The `mithril` system user has no home directory, so npm cannot write its cache. The installer creates `/var/cache/mithril-proxy/.npm` and sets `NPM_CONFIG_CACHE` in the env file to redirect the cache there. If you are upgrading from an older install, add this line to `/etc/mithril-proxy/env` and create the directory:
+```bash
+sudo mkdir -p /var/cache/mithril-proxy/.npm
+sudo chown -R mithril:mithril /var/cache/mithril-proxy
+echo "NPM_CONFIG_CACHE=/var/cache/mithril-proxy/.npm" | sudo tee -a /etc/mithril-proxy/env
+sudo systemctl restart mithril-proxy
+```
 
 **Too many connections error (503)**
 ```json

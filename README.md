@@ -46,8 +46,10 @@ Clients connect to `http://localhost:3000/my-server/sse`.
 ## Features
 
 - **SSE proxy** — streams MCP-over-SSE events between clients and upstreams
+- **stdio bridge** — spawns local subprocesses (e.g. `npx` MCP servers) and bridges their stdin/stdout as SSE; one subprocess per client connection with automatic restart on exit
 - **Session routing** — rewrites upstream `endpoint` events so clients post messages back through the proxy
 - **Pass-through auth** — Bearer token forwarded to upstream unchanged; no proxy-level credential store
+- **Audit logging** — full JSON-RPC request/response bodies, `rpc_id`, and `mcp_method` in every log line; 32 KB truncation; toggle with `AUDIT_LOG_BODIES=false`
 - **Structured JSON logs** — one line per request, written to a configurable file
 - **Retries** — 3 attempts with exponential backoff on upstream connection failures
 - **Health check** — `GET /health` → `{"status": "ok"}`
@@ -60,19 +62,23 @@ See [SETUP.md](SETUP.md) for full Raspberry Pi / systemd installation instructio
 
 ```bash
 pip install pytest pytest-asyncio httpx
-pytest tests/ -v
+PYTHONPATH=src pytest tests/ -v
 ```
 
 ## Project Structure
 
 ```
 src/mithril_proxy/
-  main.py     FastAPI app + route registration
+  main.py     FastAPI app + lifespan + route registration
   proxy.py    SSE forwarding + session management
+  bridge.py   stdio-to-SSE bridge + subprocess lifecycle
   config.py   YAML config loader + validation
-  logger.py   JSON log formatter + writer
+  secrets.py  Per-destination env vars from secrets.yml
+  logger.py   JSON log formatter + writer (audit logging)
+  utils.py    Shared request helpers (source_ip)
 config/
   destinations.yml
+  secrets.yml        (gitignored)
 systemd/
   mithril-proxy.service
 tests/

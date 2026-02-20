@@ -51,14 +51,16 @@ The intermediate `asyncio.Queue` is required because the async generator (`event
 | `secrets.py` | Loads `config/secrets.yml` (gitignored); supplies per-destination env vars injected into subprocesses |
 | `proxy.py` | SSE proxy + session map for SSE-type destinations; dispatches stdio destinations to `bridge.py` |
 | `bridge.py` | stdio-to-SSE bridge: subprocess lifecycle, I/O tasks, session registry, shutdown |
-| `logger.py` | Newline-delimited JSON log writer; `log_request()` is the single call site for all request logging |
+| `logger.py` | Newline-delimited JSON log writer; `log_request()` is the single call site for all request logging; supports `AUDIT_LOG_BODIES` flag, `rpc_id`, `request_body`, `response_body` fields, and 32 KB truncation |
+| `utils.py` | Shared request helpers (`source_ip()`); X-Forwarded-For is intentionally ignored — no trusted upstream proxy in this deployment |
 
 ### Security constraints in bridge.py
 
-- Subprocess env uses `_SAFE_ENV_KEYS` allowlist — only `PATH`, `HOME`, `USER`, etc. are inherited from the parent process; secrets come exclusively from `secrets.yml` via `extra_env`.
+- Subprocess env uses `_SAFE_ENV_KEYS` allowlist — only `PATH`, `HOME`, `USER`, `NPM_CONFIG_CACHE`, etc. are inherited from the parent process; secrets come exclusively from `secrets.yml` via `extra_env`.
 - `_UUID4_RE` validates `session_id` format before any session lookup.
 - Per-destination connection cap: `_MAX_CONNECTIONS_PER_DEST` (default 10, override with `MAX_STDIO_CONNECTIONS` env var).
 - Both `stdin_queue` and `out_queue` are bounded (`maxsize=256`).
+- `source_ip()` uses only `request.client.host` — `X-Forwarded-For` is not trusted (no upstream reverse proxy in this deployment).
 
 ### Config files
 
@@ -95,4 +97,4 @@ destinations:
 
 ### Deployment
 
-Production target is Raspberry Pi OS. `install.sh` creates a `mithril` system user, installs to `/opt/mithril-proxy`, and registers a systemd service (`systemd/mithril-proxy.service`). Config lives in `/etc/mithril-proxy/`, logs in `/var/log/mithril-proxy/proxy.log`.
+Production target is Raspberry Pi OS. `install.sh` creates a `mithril` system user (no home directory), installs to `/opt/mithril-proxy`, and registers a systemd service (`systemd/mithril-proxy.service`). Config lives in `/etc/mithril-proxy/`, logs in `/var/log/mithril-proxy/proxy.log`, npm cache in `/var/cache/mithril-proxy/.npm` (set via `NPM_CONFIG_CACHE` in the env file so stdio subprocesses can write their npm cache without a home directory).
