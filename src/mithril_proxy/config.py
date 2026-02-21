@@ -16,12 +16,19 @@ _DEFAULT_CONFIG_PATH = Path(__file__).parent.parent.parent / "config" / "destina
 _destinations: dict[str, DestinationConfig] = {}
 
 
+_VALID_DETECTION_MODES = ("off", "monitor", "redact", "block")
+
+
 @dataclass
 class DestinationConfig:
     type: str = "sse"
     url: Optional[str] = None
     command: Optional[str] = None
     env: dict[str, str] = field(default_factory=dict)
+    regex_mode: str = "off"
+    ai_mode: str = "off"
+    ai_threshold: Optional[float] = None
+    ai_max_chars: int = 4000
 
 
 def _resolve_config_path() -> Path:
@@ -65,6 +72,47 @@ def load_config(path: Optional[Path] = None) -> None:
             f"{config_path}: 'destinations' must be a mapping of name → {{url: ...}}."
         )
 
+    def _parse_detection_fields(entry: dict, name: str, config_path: Path) -> dict:
+        """Extract and validate detection config fields from a destination entry."""
+        fields: dict = {}
+        for mode_key in ("regex_mode", "ai_mode"):
+            val = entry.get(mode_key)
+            if val is not None:
+                val = str(val).strip().lower()
+                if val not in _VALID_DETECTION_MODES:
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' has invalid {mode_key} "
+                        f"'{val}'. Accepted values: {', '.join(_VALID_DETECTION_MODES)}."
+                    )
+                fields[mode_key] = val
+        ai_threshold = entry.get("ai_threshold")
+        if ai_threshold is not None:
+            try:
+                ai_threshold = float(ai_threshold)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{config_path}: destination '{name}' ai_threshold must be a number."
+                )
+            if not (0.0 <= ai_threshold <= 1.0):
+                raise ValueError(
+                    f"{config_path}: destination '{name}' ai_threshold must be between 0.0 and 1.0."
+                )
+            fields["ai_threshold"] = ai_threshold
+        ai_max_chars = entry.get("ai_max_chars")
+        if ai_max_chars is not None:
+            try:
+                ai_max_chars = int(ai_max_chars)
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"{config_path}: destination '{name}' ai_max_chars must be an integer."
+                )
+            if ai_max_chars < 1:
+                raise ValueError(
+                    f"{config_path}: destination '{name}' ai_max_chars must be >= 1."
+                )
+            fields["ai_max_chars"] = ai_max_chars
+        return fields
+
     parsed: dict[str, DestinationConfig] = {}
     for name, entry in destinations_raw.items():
         if isinstance(entry, str):
@@ -93,6 +141,8 @@ def load_config(path: Optional[Path] = None) -> None:
             # Coerce YAML-parsed values (ints, bools, etc.) to strings
             env_dict = {k: str(v) for k, v in env_block.items()}
 
+            detection = _parse_detection_fields(entry, name, config_path)
+
             if dest_type == "sse":
                 url = entry.get("url", "")
                 if not isinstance(url, str) or not url.strip():
@@ -103,6 +153,7 @@ def load_config(path: Optional[Path] = None) -> None:
                     type="sse",
                     url=url.strip().rstrip("/"),
                     env=env_dict,
+                    **detection,
                 )
 
             elif dest_type == "streamable_http":
@@ -121,6 +172,7 @@ def load_config(path: Optional[Path] = None) -> None:
                     type="streamable_http",
                     url=url.strip().rstrip("/"),
                     env=env_dict,
+                    **detection,
                 )
 
             else:  # stdio
@@ -144,6 +196,7 @@ def load_config(path: Optional[Path] = None) -> None:
                     type="stdio",
                     command=command,
                     env=env_dict,
+                    **detection,
                 )
 
         else:

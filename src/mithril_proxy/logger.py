@@ -95,6 +95,9 @@ def log_request(
     rpc_id=None,
     request_body: Optional[str] = None,
     response_body: Optional[str] = None,
+    detection_action: Optional[str] = None,
+    detection_engine: Optional[str] = None,
+    detection_detail: Optional[str] = None,
 ) -> None:
     """Write one structured JSON log line for a proxied request."""
     logger = get_logger()
@@ -111,6 +114,13 @@ def log_request(
 
     if rpc_id is not None:
         extra["rpc_id"] = rpc_id
+
+    if detection_action is not None:
+        extra["detection_action"] = detection_action
+    if detection_engine is not None:
+        extra["detection_engine"] = detection_engine
+    if detection_detail is not None:
+        extra["detection_detail"] = detection_detail[:_AUDIT_MAX_BYTES]
 
     if _audit_enabled():
         for field_name, value in (("request_body", request_body), ("response_body", response_body)):

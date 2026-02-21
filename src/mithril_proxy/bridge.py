@@ -31,8 +31,9 @@ from typing import TYPE_CHECKING, AsyncIterator, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
+from .detector import DetectionResult, scan as detector_scan
 from .logger import get_logger, log_request
-from .utils import source_ip as _source_ip
+from .utils import detection_log_kwargs as _detection_log_kwargs, source_ip as _source_ip
 
 if TYPE_CHECKING:
     from .config import DestinationConfig
@@ -244,37 +245,79 @@ async def _stdio_stdout_reader(
                     continue
 
                 msg_id = msg.get("id")
+
+                # --- Response scanning ---
+                try:
+                    resp_scan = await detector_scan(line_str, dest_config, is_response=True)
+                except Exception:
+                    logger.warning(
+                        "detector scan failed, passing message through",
+                        extra={"destination": bridge.destination},
+                    )
+                    resp_scan = DetectionResult(action="pass", body=line_str)
+
+                det_kwargs = _detection_log_kwargs(resp_scan)
+
+                def _log_stdio(*, rpc_id=None, response_body=None):
+                    log_request(
+                        user="stdio",
+                        source_ip="localhost",
+                        destination=bridge.destination,
+                        mcp_method=None,
+                        status_code=200,
+                        latency_ms=0.0,
+                        rpc_id=rpc_id,
+                        response_body=response_body,
+                        **det_kwargs,
+                    )
+
                 if msg_id is not None and msg_id in bridge.pending:
                     future, original_id = bridge.pending.pop(msg_id)
                     msg["id"] = original_id
-                    log_request(
-                        user="stdio",
-                        source_ip="localhost",
-                        destination=bridge.destination,
-                        mcp_method=None,
-                        status_code=200,
-                        latency_ms=0.0,
-                        rpc_id=original_id,
-                        response_body=line_str,
-                    )
-                    if not future.done():
-                        future.set_result(msg)
+
+                    if resp_scan.action == "block":
+                        blocked_msg = {
+                            "jsonrpc": "2.0",
+                            "error": {"code": -32603, "message": "Response blocked by injection filter"},
+                            "id": original_id,
+                        }
+                        _log_stdio(rpc_id=original_id, response_body=line_str)
+                        if not future.done():
+                            future.set_result(blocked_msg)
+                    elif resp_scan.action == "redact":
+                        redacted_str = resp_scan.body
+                        try:
+                            redacted_msg = json.loads(redacted_str)
+                            redacted_msg["id"] = original_id
+                        except Exception:
+                            logger.warning(
+                                "redacted body is not valid JSON, blocking response",
+                                extra={"destination": bridge.destination},
+                            )
+                            redacted_msg = {
+                                "jsonrpc": "2.0",
+                                "error": {"code": -32603, "message": "Response redaction failed"},
+                                "id": original_id,
+                            }
+                        _log_stdio(rpc_id=original_id, response_body=redacted_str)
+                        if not future.done():
+                            future.set_result(redacted_msg)
+                    else:
+                        _log_stdio(rpc_id=original_id, response_body=line_str)
+                        if not future.done():
+                            future.set_result(msg)
                 else:
                     # Notification — broadcast to all active GET streams
-                    log_request(
-                        user="stdio",
-                        source_ip="localhost",
-                        destination=bridge.destination,
-                        mcp_method=None,
-                        status_code=200,
-                        latency_ms=0.0,
-                        response_body=line_str,
-                    )
-                    for q in list(bridge.notification_queues.values()):
-                        try:
-                            q.put_nowait(line_str)
-                        except asyncio.QueueFull:
-                            pass
+                    broadcast_str = resp_scan.body if resp_scan.action == "redact" else line_str
+                    if resp_scan.action != "block":
+                        _log_stdio(response_body=broadcast_str)
+                        for q in list(bridge.notification_queues.values()):
+                            try:
+                                q.put_nowait(broadcast_str)
+                            except asyncio.QueueFull:
+                                pass
+                    else:
+                        _log_stdio(response_body=line_str)
 
         except Exception as exc:
             logger.warning(

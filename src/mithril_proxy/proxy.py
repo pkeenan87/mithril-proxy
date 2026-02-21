@@ -16,10 +16,27 @@ from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from .config import get_destination
+from .detector import scan as detector_scan
 from .logger import log_request
-from .utils import source_ip as _source_ip
+from .utils import detection_log_kwargs as _detection_log_kwargs, source_ip as _source_ip
 
 _log = logging.getLogger("mithril_proxy")
+
+
+# --------------------------------------------------------------------------- #
+#  Detection helpers                                                           #
+# --------------------------------------------------------------------------- #
+
+def _jsonrpc_error_response(code: int, message: str, rpc_id, status_code: int = 400) -> JSONResponse:
+    """Return a JSON-RPC error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "jsonrpc": "2.0",
+            "error": {"code": code, "message": message},
+            "id": rpc_id,
+        },
+    )
 
 # --------------------------------------------------------------------------- #
 #  Session map: session_id → upstream message URL                             #
@@ -313,6 +330,23 @@ async def handle_message(
     except Exception:
         pass
 
+    # --- Request scanning ---
+    det_kwargs: dict = {}
+    req_scan = await detector_scan(request_body_str, dest_config)
+    if req_scan.action == "block":
+        latency_ms = (time.monotonic() - start) * 1000
+        log_request(
+            user=user, source_ip=source_ip, destination=destination,
+            mcp_method=mcp_method, status_code=400, latency_ms=latency_ms,
+            rpc_id=rpc_id, request_body=request_body_str,
+            **_detection_log_kwargs(req_scan),
+        )
+        return _jsonrpc_error_response(-32600, "Request blocked by injection filter", rpc_id)
+    if req_scan.action != "pass":
+        det_kwargs = _detection_log_kwargs(req_scan)
+        request_body_str = req_scan.body
+        body = req_scan.body.encode()
+
     error_msg: Optional[str] = None
     status_code = 502
 
@@ -346,11 +380,28 @@ async def handle_message(
             error=error_msg,
             rpc_id=rpc_id,
             request_body=request_body_str,
+            **det_kwargs,
         )
         return JSONResponse(
             status_code=502,
             content={"error": "Upstream unreachable", "detail": str(exc)},
         )
+
+    # --- Response scanning ---
+    resp_scan = await detector_scan(response_body_str, dest_config, is_response=True)
+    if resp_scan.action == "block":
+        latency_ms = (time.monotonic() - start) * 1000
+        log_request(
+            user=user, source_ip=source_ip, destination=destination,
+            mcp_method=mcp_method, status_code=status_code, latency_ms=latency_ms,
+            rpc_id=rpc_id, request_body=request_body_str,
+            **_detection_log_kwargs(resp_scan),
+        )
+        return _jsonrpc_error_response(-32603, "Response blocked by injection filter", rpc_id)
+    if resp_scan.action != "pass":
+        det_kwargs.update(_detection_log_kwargs(resp_scan))
+        response_body_str = resp_scan.body
+        response_body = resp_scan.body.encode()
 
     latency_ms = (time.monotonic() - start) * 1000
     log_request(
@@ -364,6 +415,7 @@ async def handle_message(
         rpc_id=rpc_id,
         request_body=request_body_str,
         response_body=response_body_str,
+        **det_kwargs,
     )
 
     return Response(
@@ -434,6 +486,23 @@ async def handle_streamable_http_post(
     except Exception:
         pass
 
+    # --- Request scanning ---
+    det_kwargs: dict = {}
+    req_scan = await detector_scan(request_body_str, dest_config)
+    if req_scan.action == "block":
+        latency_ms = (time.monotonic() - start) * 1000
+        log_request(
+            user=user, source_ip=source_ip, destination=destination,
+            mcp_method=mcp_method, status_code=400, latency_ms=latency_ms,
+            rpc_id=rpc_id, request_body=request_body_str,
+            **_detection_log_kwargs(req_scan),
+        )
+        return _jsonrpc_error_response(-32600, "Request blocked by injection filter", rpc_id)
+    if req_scan.action != "pass":
+        det_kwargs = _detection_log_kwargs(req_scan)
+        request_body_str = req_scan.body
+        body = req_scan.body.encode()
+
     sem = _get_streamable_http_semaphore(destination)
     await sem.acquire()
 
@@ -460,6 +529,7 @@ async def handle_streamable_http_post(
                 error=str(exc),
                 rpc_id=rpc_id,
                 request_body=request_body_str,
+                **det_kwargs,
             )
             return JSONResponse(
                 status_code=502,
@@ -473,8 +543,8 @@ async def handle_streamable_http_post(
         }
 
         if "text/event-stream" in content_type:
-            # Capture status_code in a local so the closure doesn't reference
-            # the outer-scope name (which could be reassigned by a future edit).
+            # SSE streaming responses are not scanned — individual SSE frames
+            # cannot be easily reconstructed into JSON-RPC objects mid-stream.
             captured_status = status_code
 
             async def sse_stream() -> AsyncIterator[bytes]:
@@ -511,6 +581,7 @@ async def handle_streamable_http_post(
                         rpc_id=rpc_id,
                         request_body=request_body_str,
                         error=error_msg,
+                        **det_kwargs,
                     )
 
             client_released = True  # generator owns cleanup from here
@@ -533,6 +604,26 @@ async def handle_streamable_http_post(
                         rpc_id = resp_payload.get("id")
                 except Exception:
                     pass
+
+                # --- Response scanning ---
+                resp_scan = await detector_scan(response_body_str, dest_config, is_response=True)
+                if resp_scan.action == "block":
+                    latency_ms = (time.monotonic() - start) * 1000
+                    log_request(
+                        user=user, source_ip=source_ip, destination=destination,
+                        mcp_method=mcp_method, status_code=status_code,
+                        latency_ms=latency_ms, rpc_id=rpc_id,
+                        request_body=request_body_str,
+                        **_detection_log_kwargs(resp_scan),
+                    )
+                    return _jsonrpc_error_response(
+                        -32603, "Response blocked by injection filter", rpc_id,
+                    )
+                if resp_scan.action != "pass":
+                    det_kwargs.update(_detection_log_kwargs(resp_scan))
+                    response_body_str = resp_scan.body
+                    response_body = resp_scan.body.encode()
+
                 latency_ms = (time.monotonic() - start) * 1000
                 log_request(
                     user=user,
@@ -544,6 +635,7 @@ async def handle_streamable_http_post(
                     rpc_id=rpc_id,
                     request_body=request_body_str,
                     response_body=response_body_str,
+                    **det_kwargs,
                 )
                 return Response(
                     content=response_body,
@@ -562,6 +654,7 @@ async def handle_streamable_http_post(
                     error=str(exc),
                     rpc_id=rpc_id,
                     request_body=request_body_str,
+                    **det_kwargs,
                 )
                 return JSONResponse(
                     status_code=502,

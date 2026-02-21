@@ -3,3 +3,8 @@ uvicorn[standard]>=0.32.0
 httpx[http2]>=0.28.0
 pyyaml>=6.0.2
 python-dotenv>=1.0.1
+
+# Optional: AI-based prompt injection detection engine
+# Install with: pip install 'transformers>=4.40.0' torch --index-url https://download.pytorch.org/whl/cpu
+# transformers>=4.40.0
+# torch

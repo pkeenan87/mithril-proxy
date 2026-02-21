@@ -18,9 +18,18 @@
 #   env:                         # optional inline env vars (not for secrets)
 #     SOME_VAR: value
 #
+# --- Prompt injection detection (per-destination, optional) ---
+# Modes: off (default), monitor, redact, block
+#   regex_mode: monitor          # regex pattern matching from patterns.d/
+#   ai_mode: off                 # AI classification (requires transformers + torch)
+#   ai_threshold: 0.85           # override global AI_INJECTION_THRESHOLD (0.0-1.0)
+#   ai_max_chars: 4000           # skip AI scan for bodies larger than this
+#
 # Secrets (API keys etc.) belong in config/secrets.yml, which is gitignored.
 
 # destinations:
 #   context7:
 #     type: stdio
 #     command: npx -y @upstash/context7-mcp
+#     regex_mode: monitor
+#     ai_mode: off

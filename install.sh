@@ -67,6 +67,7 @@ if [ ! -f "$ENV_FILE" ]; then
 # mithril-proxy environment configuration
 LOG_FILE=/var/log/mithril-proxy/proxy.log
 DESTINATIONS_CONFIG=/etc/mithril-proxy/destinations.yml
+PATTERNS_DIR=/etc/mithril-proxy/patterns.d
 PYTHONPATH=/opt/mithril-proxy/src
 NPM_CONFIG_CACHE=/var/cache/mithril-proxy/.npm
 EOF
@@ -87,8 +88,27 @@ else
     echo "[=] $DEST_FILE already exists — not overwritten."
 fi
 
+# --------------------------------------------------------------------------- #
+# 6b. Detection patterns
+# --------------------------------------------------------------------------- #
+PATTERNS_DIR="$CONFIG_DIR/patterns.d"
+echo "[+] Setting up detection patterns directory $PATTERNS_DIR..."
+mkdir -p "$PATTERNS_DIR"
+
+# Seed default patterns if the directory is empty (first install)
+if [ -z "$(ls -A "$PATTERNS_DIR" 2>/dev/null)" ]; then
+    cp "$INSTALL_DIR/config/patterns.d/"*.conf "$PATTERNS_DIR/" 2>/dev/null || true
+    echo "[+] Seeded default detection patterns."
+    echo "    -> Edit files in $PATTERNS_DIR to customise, then reload:"
+    echo "       curl -X POST http://localhost:3000/admin/reload-patterns"
+else
+    echo "[=] $PATTERNS_DIR already contains patterns — not overwritten."
+fi
+
 chown -R root:"$SERVICE_USER" "$CONFIG_DIR"
 chmod 640 "$ENV_FILE" "$DEST_FILE"
+chmod 750 "$PATTERNS_DIR"
+find "$PATTERNS_DIR" -type f -exec chmod 640 {} \;
 
 # --------------------------------------------------------------------------- #
 # 7. systemd unit file
