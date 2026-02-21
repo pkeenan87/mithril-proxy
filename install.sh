@@ -105,10 +105,13 @@ else
     echo "[=] $PATTERNS_DIR already contains patterns — not overwritten."
 fi
 
-chown -R root:"$SERVICE_USER" "$CONFIG_DIR"
-chmod 640 "$ENV_FILE" "$DEST_FILE"
-chmod 750 "$PATTERNS_DIR"
-find "$PATTERNS_DIR" -type f -exec chmod 640 {} \;
+# --------------------------------------------------------------------------- #
+# 6c. Config directory ownership — ensure the service user can read everything
+# --------------------------------------------------------------------------- #
+chown -R "$SERVICE_USER:$SERVICE_USER" "$CONFIG_DIR"
+chmod 750 "$CONFIG_DIR"
+find "$CONFIG_DIR" -type d -exec chmod 750 {} \;
+find "$CONFIG_DIR" -type f -exec chmod 640 {} \;
 
 # --------------------------------------------------------------------------- #
 # 7. systemd unit file
