@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 # install.sh — bootstrap mithril-proxy on a fresh Raspberry Pi OS install
 set -euo pipefail

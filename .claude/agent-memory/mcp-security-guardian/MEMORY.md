@@ -123,6 +123,46 @@
   is never called — unhandled exception surfaces as 500 with no structured log record.
   Pattern: initialise response_body=b"" before try; move log_request into finally.
 
+## Confirmed Vulnerability Patterns (stdio Streamable HTTP migration, 2026-02-21)
+
+### Session slot leak — first-POST notification on new session
+- `bridge.py:479-529`: when the FIRST POST for a destination omits `Mcp-Session-Id` AND
+  the body is a notification (no `id` field), the session UUID is added to `bridge.sessions`
+  but the 202 response does NOT include the `mcp-session-id` header. The client never learns
+  the UUID; the slot can never be DELETEd. Repeated first-POST notifications fill the
+  `_MAX_CONNECTIONS_PER_DEST` cap and deny all further sessions (DoS).
+  Pattern: reject `new_session AND original_id is None` with 400 before adding to sessions.
+
+### Session slot leak — OSError after sessions.add() during subprocess restart sleep
+- `bridge.py:492, 546-561`: if the subprocess is between retries (sleeping in
+  `_stdio_stdout_reader`), `_ensure_subprocess` returns without spawning. The new POST
+  then adds a UUID to `bridge.sessions`, attempts `stdin.write`, hits `OSError` on the
+  dead pipe, and returns 503. The session UUID is never removed. Same cap-exhaustion risk.
+  Pattern: on every early-return error path after `bridge.sessions.add()`, call
+  `bridge.sessions.discard(session_id)` when `new_session is True`.
+
+### Inconsistent session ID validation on DELETE
+- `bridge.py:711-723`: DELETE checks only that the header is non-empty, then tests set
+  membership. POST and GET both call `_UUID4_RE.match()` first. Apply the regex on DELETE
+  too for consistent defence-in-depth.
+
+### _ensure_subprocess exception text in 503 response body
+- `bridge.py:454-460`: OSError / PermissionError from subprocess spawn is returned verbatim
+  in the HTTP 503 body, exposing filesystem paths and OS error detail. Use a static message;
+  log full detail internally.
+
+### _SENTINEL dead code left with misleading "backward compatibility" comment
+- `bridge.py:66-67`: `_stdin_writer` no longer exists. Remove `_SENTINEL`.
+
+### Future-hijacking via subprocess stdout: confirmed MITIGATED
+- Internal ID rewriting (`bridge._counter`) means the subprocess only sees monotonic proxy
+  IDs, never original client IDs. A compromised subprocess cannot target a specific client's
+  future. The `pop(msg_id)` dispatch is safe.
+
+### _counter atomicity: confirmed SAFE
+- `bridge._counter += 1` has no await points surrounding it; single-loop asyncio makes it
+  effectively atomic. No lock needed.
+
 ## Patterns To Reuse
 
 - Always validate session IDs against a strict regex `^[A-Za-z0-9_-]{8,128}$` before

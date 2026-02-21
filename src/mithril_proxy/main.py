@@ -13,7 +13,13 @@ from fastapi.responses import JSONResponse
 from .bridge import init_bridge, shutdown_all_stdio, validate_stdio_commands
 from .config import get_stdio_destinations, load_config
 from .logger import setup_logging
-from .proxy import handle_message, handle_sse, handle_streamable_http_get, handle_streamable_http_post
+from .proxy import (
+    handle_message,
+    handle_sse,
+    handle_streamable_http_delete,
+    handle_streamable_http_get,
+    handle_streamable_http_post,
+)
 from .secrets import load_secrets
 
 
@@ -61,3 +67,8 @@ async def mcp_post_endpoint(destination: str, request: Request):
 @app.get("/{destination}/mcp")
 async def mcp_get_endpoint(destination: str, request: Request):
     return await handle_streamable_http_get(request, destination)
+
+
+@app.delete("/{destination}/mcp")
+async def mcp_delete_endpoint(destination: str, request: Request):
+    return await handle_streamable_http_delete(request, destination)

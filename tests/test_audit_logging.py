@@ -57,13 +57,25 @@ def setup_logger(tmp_log):
 
 @pytest.fixture(autouse=True)
 def reset_bridge_state():
-    """Prevent _stdio_sessions leaking between tests."""
+    """Prevent _stdio_bridges leaking between tests."""
     import mithril_proxy.bridge as bridge
-    bridge._stdio_sessions.clear()
-    bridge._stdio_lock = None
+    for b in list(bridge._stdio_bridges.values()):
+        if b.process and b.process.returncode is None:
+            try:
+                b.process.terminate()
+            except ProcessLookupError:
+                pass
+    bridge._stdio_bridges.clear()
+    bridge._bridges_create_lock = None
     yield
-    bridge._stdio_sessions.clear()
-    bridge._stdio_lock = None
+    for b in list(bridge._stdio_bridges.values()):
+        if b.process and b.process.returncode is None:
+            try:
+                b.process.terminate()
+            except ProcessLookupError:
+                pass
+    bridge._stdio_bridges.clear()
+    bridge._bridges_create_lock = None
 
 
 @pytest.fixture()
@@ -422,32 +434,33 @@ class TestSseProxyAuditLogging:
 
 
 # --------------------------------------------------------------------------- #
-# TestStdioAuditLogging — integration via bridge functions
+# TestStdioAuditLogging — integration via new bridge functions
 # --------------------------------------------------------------------------- #
 
 class TestStdioAuditLogging:
     @pytest.mark.asyncio
-    async def test_handle_stdio_message_logs_request_body(self, setup_logger, tmp_log):
-        """handle_stdio_message() must log request_body."""
-        from mithril_proxy.bridge import StdioSession, _stdio_sessions, handle_stdio_message
+    async def test_post_handler_logs_request_body(self, setup_logger, tmp_log, tmp_path):
+        """handle_stdio_streamable_http_post() must log request_body."""
+        from mithril_proxy.bridge import handle_stdio_streamable_http_post
+        from mithril_proxy.config import DestinationConfig
 
-        fake_queue: asyncio.Queue = asyncio.Queue()
-        proc = MagicMock()
-        proc.returncode = None
-        session = StdioSession(
-            session_id=_UUID_A,
-            destination="testdest",
-            process=proc,
-            stdin_queue=fake_queue,
+        echo_script = tmp_path / "echo_audit.py"
+        echo_script.write_text(
+            "import sys\n"
+            "for line in sys.stdin:\n"
+            "    print(line.rstrip(), flush=True)\n"
         )
-        _stdio_sessions[_UUID_A] = session
+        dest_config = DestinationConfig(type="stdio", command=f"python3 {echo_script}")
 
         request = MagicMock()
         body = b'{"jsonrpc":"2.0","method":"tools/call","id":5}'
         request.body = AsyncMock(return_value=body)
+        request.headers = {}
+        request.client = MagicMock()
+        request.client.host = "127.0.0.1"
 
-        resp = await handle_stdio_message(request, "testdest", _UUID_A)
-        assert resp.status_code == 202
+        resp = await handle_stdio_streamable_http_post(request, "testdest", dest_config, {})
+        assert resp.status_code == 200
 
         lines = _read_log_lines(tmp_log)
         matching = [l for l in lines if "request_body" in l]
@@ -459,27 +472,39 @@ class TestStdioAuditLogging:
 
     @pytest.mark.asyncio
     async def test_stdout_reader_logs_response_body(self, setup_logger, tmp_log):
-        """_stdout_reader() must log each stdout line as response_body."""
-        from mithril_proxy.bridge import _stdout_reader
+        """_stdio_stdout_reader() must log each dispatched response as response_body."""
+        from mithril_proxy.bridge import StdioDestinationBridge, _stdio_stdout_reader, _stdio_bridges
+        from mithril_proxy.config import DestinationConfig
 
-        line_data = b'{"jsonrpc":"2.0","result":{"content":"ok"},"id":3}\n'
+        bridge = StdioDestinationBridge(destination="testdest")
+        _stdio_bridges["testdest"] = bridge
+
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        bridge.pending[0] = (future, 3)  # internal_id=0, original_id=3
+
+        line_bytes = b'{"jsonrpc":"2.0","result":{"content":"ok"},"id":0}\n'
+        responses = [line_bytes, b""]
         call_count = 0
 
         async def mock_readline():
             nonlocal call_count
+            data = responses[min(call_count, len(responses) - 1)]
             call_count += 1
-            return line_data if call_count == 1 else b""
+            return data
 
-        mock_stdout = MagicMock()
-        mock_stdout.readline = mock_readline
         mock_process = MagicMock()
-        mock_process.stdout = mock_stdout
+        mock_process.stdout.readline = mock_readline
+        mock_process.wait = AsyncMock(return_value=0)
+        mock_process.returncode = None
+        bridge.process = mock_process
 
-        out_queue: asyncio.Queue = asyncio.Queue()
-        await _stdout_reader(mock_process, out_queue, "testdest", _UUID_A)
+        dest_config = DestinationConfig(type="stdio", command="python3 --version")
+        with patch("mithril_proxy.bridge._RETRY_DELAYS", []):
+            await _stdio_stdout_reader(bridge, dest_config, {})
 
-        lines = _read_log_lines(tmp_log)
-        response_entries = [l for l in lines if "response_body" in l]
+        log_lines = _read_log_lines(tmp_log)
+        response_entries = [l for l in log_lines if "response_body" in l]
         assert response_entries, "Expected a log entry with response_body"
         entry = response_entries[0]
         assert "content" in entry["response_body"]
@@ -487,30 +512,41 @@ class TestStdioAuditLogging:
 
     @pytest.mark.asyncio
     async def test_stdout_reader_separate_entry_per_line(self, setup_logger, tmp_log):
-        """Each stdout line must produce exactly one separate log entry."""
-        from mithril_proxy.bridge import _stdout_reader
+        """Each stdout response line produces exactly one separate log entry."""
+        from mithril_proxy.bridge import StdioDestinationBridge, _stdio_stdout_reader, _stdio_bridges
+        from mithril_proxy.config import DestinationConfig
+
+        bridge = StdioDestinationBridge(destination="testdest")
+        _stdio_bridges["testdest"] = bridge
+
+        loop = asyncio.get_running_loop()
+        f1 = loop.create_future()
+        f2 = loop.create_future()
+        bridge.pending[0] = (f1, 1)  # internal_id=0, original_id=1
+        bridge.pending[1] = (f2, 2)  # internal_id=1, original_id=2
 
         lines_to_emit = [
+            b'{"jsonrpc":"2.0","result":{},"id":0}\n',
             b'{"jsonrpc":"2.0","result":{},"id":1}\n',
-            b'{"jsonrpc":"2.0","result":{},"id":2}\n',
+            b"",
         ]
         call_count = 0
 
         async def mock_readline():
             nonlocal call_count
-            if call_count < len(lines_to_emit):
-                data = lines_to_emit[call_count]
-                call_count += 1
-                return data
-            return b""
+            data = lines_to_emit[min(call_count, len(lines_to_emit) - 1)]
+            call_count += 1
+            return data
 
-        mock_stdout = MagicMock()
-        mock_stdout.readline = mock_readline
         mock_process = MagicMock()
-        mock_process.stdout = mock_stdout
+        mock_process.stdout.readline = mock_readline
+        mock_process.wait = AsyncMock(return_value=0)
+        mock_process.returncode = None
+        bridge.process = mock_process
 
-        out_queue: asyncio.Queue = asyncio.Queue()
-        await _stdout_reader(mock_process, out_queue, "testdest", _UUID_A)
+        dest_config = DestinationConfig(type="stdio", command="python3 --version")
+        with patch("mithril_proxy.bridge._RETRY_DELAYS", []):
+            await _stdio_stdout_reader(bridge, dest_config, {})
 
         log_lines = _read_log_lines(tmp_log)
         response_entries = [l for l in log_lines if "response_body" in l]
@@ -519,62 +555,69 @@ class TestStdioAuditLogging:
         assert rpc_ids == {1, 2}
 
     @pytest.mark.asyncio
-    async def test_stdout_reader_non_json_line_no_rpc_id(self, setup_logger, tmp_log):
-        """Non-JSON stdout lines are logged without rpc_id."""
-        from mithril_proxy.bridge import _stdout_reader
+    async def test_stdout_reader_malformed_json_no_response_log(self, setup_logger, tmp_log):
+        """Malformed JSON stdout lines produce a warning, not a response_body log entry."""
+        from mithril_proxy.bridge import StdioDestinationBridge, _stdio_stdout_reader, _stdio_bridges
+        from mithril_proxy.config import DestinationConfig
 
+        bridge = StdioDestinationBridge(destination="testdest")
+        _stdio_bridges["testdest"] = bridge
+
+        responses = [b"plain text output\n", b""]
         call_count = 0
 
         async def mock_readline():
             nonlocal call_count
+            data = responses[min(call_count, len(responses) - 1)]
             call_count += 1
-            return b"plain text output\n" if call_count == 1 else b""
+            return data
 
-        mock_stdout = MagicMock()
-        mock_stdout.readline = mock_readline
         mock_process = MagicMock()
-        mock_process.stdout = mock_stdout
+        mock_process.stdout.readline = mock_readline
+        mock_process.wait = AsyncMock(return_value=0)
+        mock_process.returncode = None
+        bridge.process = mock_process
 
-        out_queue: asyncio.Queue = asyncio.Queue()
-        await _stdout_reader(mock_process, out_queue, "testdest", _UUID_A)
+        dest_config = DestinationConfig(type="stdio", command="python3 --version")
+        with patch("mithril_proxy.bridge._RETRY_DELAYS", []):
+            await _stdio_stdout_reader(bridge, dest_config, {})
 
         log_lines = _read_log_lines(tmp_log)
         response_entries = [l for l in log_lines if "response_body" in l]
-        assert response_entries
-        entry = response_entries[0]
-        assert entry["response_body"] == "plain text output"
-        assert "rpc_id" not in entry
+        assert not response_entries, "Malformed JSON must not produce a response_body log entry"
 
     @pytest.mark.asyncio
-    async def test_stdio_audit_disabled_omits_bodies(self, setup_logger, tmp_log):
-        """With AUDIT_LOG_BODIES=false, stdio log entries omit request_body."""
-        from mithril_proxy.bridge import StdioSession, _stdio_sessions, handle_stdio_message
+    async def test_stdio_audit_disabled_omits_bodies(self, setup_logger, tmp_log, tmp_path):
+        """With AUDIT_LOG_BODIES=false, POST log entries omit request_body and response_body."""
+        from mithril_proxy.bridge import handle_stdio_streamable_http_post
+        from mithril_proxy.config import DestinationConfig
 
-        fake_queue: asyncio.Queue = asyncio.Queue()
-        proc = MagicMock()
-        proc.returncode = None
-        session = StdioSession(
-            session_id=_UUID_A,
-            destination="testdest",
-            process=proc,
-            stdin_queue=fake_queue,
+        echo_script = tmp_path / "echo_audit2.py"
+        echo_script.write_text(
+            "import sys\n"
+            "for line in sys.stdin:\n"
+            "    print(line.rstrip(), flush=True)\n"
         )
-        _stdio_sessions[_UUID_A] = session
+        dest_config = DestinationConfig(type="stdio", command=f"python3 {echo_script}")
 
         request = MagicMock()
         body = b'{"jsonrpc":"2.0","method":"tools/list","id":1}'
         request.body = AsyncMock(return_value=body)
+        request.headers = {}
+        request.client = MagicMock()
+        request.client.host = "127.0.0.1"
 
         with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "false"}):
-            resp = await handle_stdio_message(request, "testdest", _UUID_A)
-
-        assert resp.status_code == 202
+            resp = await handle_stdio_streamable_http_post(request, "testdest", dest_config, {})
+        assert resp.status_code == 200
 
         log_lines = _read_log_lines(tmp_log)
-        assert log_lines, "Expected at least one log entry"
-        entry = log_lines[-1]
-        assert "request_body" not in entry
-        assert "response_body" not in entry
-        # rpc_id and mcp_method still logged
-        assert entry.get("rpc_id") == 1
-        assert entry.get("mcp_method") == "tools/list"
+        dest_entries = [l for l in log_lines if l.get("destination") == "testdest"]
+        assert dest_entries
+        for entry in dest_entries:
+            assert "request_body" not in entry
+            assert "response_body" not in entry
+        # rpc_id and mcp_method still logged in the POST handler entry
+        post_entries = [l for l in dest_entries if l.get("mcp_method") == "tools/list"]
+        assert post_entries
+        assert post_entries[-1].get("rpc_id") == 1

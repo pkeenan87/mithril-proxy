@@ -74,7 +74,7 @@ The proxy exposes `POST /{name}/mcp` and `GET /{name}/mcp`. Use `type: "http"` i
 
 ### stdio destinations (local process)
 
-The proxy spawns a local subprocess and bridges its stdin/stdout as SSE. Each client connection gets its own subprocess instance.
+The proxy spawns a local subprocess and bridges its stdin/stdout using the Streamable HTTP transport. One subprocess is shared across all sessions for a given destination — it is started on the first request and kept alive for subsequent ones.
 
 ```yaml
 destinations:
@@ -86,7 +86,9 @@ destinations:
 > **First connection note:** `npx` downloads the package on first run, which can take 15–30 seconds. Subsequent connections use the npm cache and start immediately.
 
 Each destination key becomes the URL path segment clients connect to:
-`GET http://<pi-ip>:3000/context7/sse`
+`POST http://<pi-ip>:3000/context7/mcp`
+
+Use `type: "http"` (not `"sse"`) in your MCP client config — stdio destinations expose the modern Streamable HTTP transport, not the legacy SSE endpoint.
 
 After editing:
 
@@ -187,14 +189,14 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
       }
     },
     "context7": {
-      "type": "sse",
-      "url": "http://192.168.1.10:3000/context7/sse"
+      "type": "http",
+      "url": "http://192.168.1.10:3000/context7/mcp"
     }
   }
 }
 ```
 
-> **Note:** Use `"type": "http"` (not `"sse"`) for `streamable_http` destinations. The URL ends in `/mcp`, not `/sse`.
+> **Note:** Use `"type": "http"` (not `"sse"`) for both `streamable_http` and `stdio` destinations. The URL ends in `/mcp`, not `/sse`.
 
 ### Cursor (`.cursor/mcp.json`)
 
@@ -209,7 +211,7 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
       }
     },
     "context7": {
-      "url": "http://192.168.1.10:3000/context7/sse"
+      "url": "http://192.168.1.10:3000/context7/mcp"
     }
   }
 }
@@ -233,7 +235,7 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
 1. Add the entry to `/etc/mithril-proxy/destinations.yml` with `type: stdio` and `command:`
 2. If the server requires an API key, add it to `/etc/mithril-proxy/secrets.yml`
 3. Restart: `sudo systemctl restart mithril-proxy`
-4. Point your client to `http://<pi-ip>:3000/<name>/sse` — no `Authorization` header needed
+4. Point your MCP client to `http://<pi-ip>:3000/<name>/mcp` with `type: http` in the client config — no `Authorization` header needed
 
 ---
 
@@ -318,9 +320,9 @@ sudo systemctl restart mithril-proxy
 
 **Too many connections error (503)**
 ```json
-{"error": "Too many active connections for 'context7' (max 10)"}
+{"error": "Too many active sessions for 'context7' (max 10)"}
 ```
-Each SSE client connection spawns its own subprocess. The default cap is 10 per destination. Override with `MAX_STDIO_CONNECTIONS=<n>` in `/etc/mithril-proxy/env`.
+The default cap is 10 concurrent sessions per stdio destination. Override with `MAX_STDIO_CONNECTIONS=<n>` in `/etc/mithril-proxy/env`.
 
 **Disabling audit body logging**
 By default the proxy writes the full request and response JSON-RPC payloads to the log file. To disable this (e.g. for privacy or disk-space reasons), set `AUDIT_LOG_BODIES=false` in `/etc/mithril-proxy/env`:
