@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from .bridge import init_bridge, shutdown_all_stdio, validate_stdio_commands
 from .config import get_stdio_destinations, load_config
 from .logger import setup_logging
-from .proxy import handle_message, handle_sse
+from .proxy import handle_message, handle_sse, handle_streamable_http_get, handle_streamable_http_post
 from .secrets import load_secrets
 
 
@@ -51,3 +51,13 @@ async def sse_endpoint(destination: str, request: Request):
 @app.post("/{destination}/message")
 async def message_endpoint(destination: str, request: Request):
     return await handle_message(request, destination)
+
+
+@app.post("/{destination}/mcp")
+async def mcp_post_endpoint(destination: str, request: Request):
+    return await handle_streamable_http_post(request, destination)
+
+
+@app.get("/{destination}/mcp")
+async def mcp_get_endpoint(destination: str, request: Request):
+    return await handle_streamable_http_get(request, destination)

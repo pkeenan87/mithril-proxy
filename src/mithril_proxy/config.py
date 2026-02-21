@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import yaml
 
@@ -78,10 +79,10 @@ def load_config(path: Optional[Path] = None) -> None:
         elif isinstance(entry, dict):
             dest_type = entry.get("type", "sse")
 
-            if dest_type not in ("sse", "stdio"):
+            if dest_type not in ("sse", "stdio", "streamable_http"):
                 raise ValueError(
                     f"{config_path}: destination '{name}' has unknown type '{dest_type}'. "
-                    "Accepted values: 'sse', 'stdio'."
+                    "Accepted values: 'sse', 'stdio', 'streamable_http'."
                 )
 
             env_block = entry.get("env", {})
@@ -100,6 +101,24 @@ def load_config(path: Optional[Path] = None) -> None:
                     )
                 parsed[name] = DestinationConfig(
                     type="sse",
+                    url=url.strip().rstrip("/"),
+                    env=env_dict,
+                )
+
+            elif dest_type == "streamable_http":
+                url = entry.get("url", "")
+                if not isinstance(url, str) or not url.strip():
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' (type: streamable_http) requires a non-empty 'url'."
+                    )
+                parsed_scheme = urlparse(url.strip()).scheme
+                if parsed_scheme not in ("http", "https"):
+                    raise ValueError(
+                        f"{config_path}: destination '{name}' (type: streamable_http) url must use "
+                        f"http or https scheme, got '{parsed_scheme}'."
+                    )
+                parsed[name] = DestinationConfig(
+                    type="streamable_http",
                     url=url.strip().rstrip("/"),
                     env=env_dict,
                 )

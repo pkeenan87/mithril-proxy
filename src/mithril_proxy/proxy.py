@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
+import os
 import re
 import time
 from typing import AsyncIterator, Optional
@@ -15,6 +18,8 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from .config import get_destination
 from .logger import log_request
 from .utils import source_ip as _source_ip
+
+_log = logging.getLogger("mithril_proxy")
 
 # --------------------------------------------------------------------------- #
 #  Session map: session_id → upstream message URL                             #
@@ -70,6 +75,23 @@ def _upstream_headers(request: Request) -> dict[str, str]:
 # --------------------------------------------------------------------------- #
 
 _RETRY_DELAYS = [0.5, 1.0, 2.0]
+
+# --------------------------------------------------------------------------- #
+#  Streamable HTTP — per-destination concurrency cap                          #
+# --------------------------------------------------------------------------- #
+
+_MAX_STREAMABLE_HTTP_CONNECTIONS = int(os.environ.get("MAX_STDIO_CONNECTIONS", "10"))
+_streamable_http_semaphores: dict[str, asyncio.Semaphore] = {}
+# Maximum bytes per SSE chunk forwarded from upstream; oversized chunks are
+# logged, an error event is emitted, and the stream is closed.
+_MAX_CHUNK_BYTES = 1 * 1024 * 1024  # 1 MB
+
+
+def _get_streamable_http_semaphore(destination: str) -> asyncio.Semaphore:
+    """Return the per-destination Semaphore, creating it on first call (must be async context)."""
+    if destination not in _streamable_http_semaphores:
+        _streamable_http_semaphores[destination] = asyncio.Semaphore(_MAX_STREAMABLE_HTTP_CONNECTIONS)
+    return _streamable_http_semaphores[destination]
 
 
 async def _connect_with_retries(
@@ -337,3 +359,325 @@ async def handle_message(
         status_code=status_code,
         headers=response_headers,
     )
+
+
+# --------------------------------------------------------------------------- #
+#  Streamable HTTP endpoints  POST/GET /{destination}/mcp                     #
+# --------------------------------------------------------------------------- #
+
+# Hop-by-hop headers never forwarded to clients or upstream.
+# Includes security headers (set-cookie, www-authenticate) to prevent session
+# fixation and credential leakage from a compromised upstream.
+_HOP_BY_HOP = frozenset({
+    # Standard hop-by-hop
+    "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade",
+    # Security: strip upstream auth challenges and cookies
+    "set-cookie", "www-authenticate", "proxy-authenticate", "proxy-authorization",
+})
+
+# Bounded connect timeout for long-lived GET SSE connections.  Read is
+# unbounded (None) so slow upstreams don't time out mid-stream.
+_SSE_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+
+
+async def handle_streamable_http_post(
+    request: Request,
+    destination: str,
+) -> Response:
+    dest_config = get_destination(destination)
+    if dest_config is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Unknown destination: {destination}"},
+        )
+
+    if dest_config.type != "streamable_http":
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Destination '{destination}' is not a streamable_http type"},
+        )
+
+    upstream_url = dest_config.url
+    headers = _upstream_headers(request)
+    user = _user_from_request(request)
+    source_ip = _source_ip(request)
+    start = time.monotonic()
+
+    body = await request.body()
+    request_body_str = body.decode(errors="replace")
+
+    mcp_method: Optional[str] = None
+    rpc_id = None
+    try:
+        payload = json.loads(body)
+        mcp_method = payload.get("method")
+        rpc_id = payload.get("id")
+    except Exception:
+        pass
+
+    sem = _get_streamable_http_semaphore(destination)
+    await sem.acquire()
+
+    client = httpx.AsyncClient(timeout=60.0)
+    # client_released is set to True when a generator or inner finally takes
+    # ownership of client/sem cleanup.  The outer finally is a backstop for
+    # unexpected exceptions (CancelledError, programming errors, etc.).
+    client_released = False
+    try:
+        try:
+            upstream = await client.send(
+                client.build_request("POST", upstream_url, headers=headers, content=body),
+                stream=True,
+            )
+        except httpx.HTTPError as exc:
+            latency_ms = (time.monotonic() - start) * 1000
+            log_request(
+                user=user,
+                source_ip=source_ip,
+                destination=destination,
+                mcp_method=mcp_method,
+                status_code=502,
+                latency_ms=latency_ms,
+                error=str(exc),
+                rpc_id=rpc_id,
+                request_body=request_body_str,
+            )
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Upstream unreachable"},
+            )
+
+        status_code = upstream.status_code
+        content_type = upstream.headers.get("content-type", "")
+        response_headers = {
+            k: v for k, v in upstream.headers.items() if k.lower() not in _HOP_BY_HOP
+        }
+
+        if "text/event-stream" in content_type:
+            # Capture status_code in a local so the closure doesn't reference
+            # the outer-scope name (which could be reassigned by a future edit).
+            captured_status = status_code
+
+            async def sse_stream() -> AsyncIterator[bytes]:
+                error_msg: Optional[str] = None
+                try:
+                    async for chunk in upstream.aiter_bytes():
+                        if len(chunk) > _MAX_CHUNK_BYTES:
+                            error_msg = f"Upstream chunk of {len(chunk)} bytes exceeds limit"
+                            _log.warning(
+                                "streamable_http POST: oversized chunk (%d bytes) from %s, closing stream",
+                                len(chunk), upstream_url,
+                            )
+                            yield (
+                                f"event: error\ndata: {json.dumps({'error': 'upstream chunk too large'})}\n\n"
+                            ).encode()
+                            break
+                        yield chunk
+                except httpx.HTTPError as exc:
+                    error_msg = str(exc)
+                    yield (
+                        f"event: error\ndata: {json.dumps({'error': 'upstream unavailable'})}\n\n"
+                    ).encode()
+                finally:
+                    await upstream.aclose()
+                    await client.aclose()
+                    sem.release()
+                    log_request(
+                        user=user,
+                        source_ip=source_ip,
+                        destination=destination,
+                        mcp_method=mcp_method,
+                        status_code=captured_status,
+                        latency_ms=(time.monotonic() - start) * 1000,
+                        rpc_id=rpc_id,
+                        request_body=request_body_str,
+                        error=error_msg,
+                    )
+
+            client_released = True  # generator owns cleanup from here
+            # Forward upstream headers (e.g. Mcp-Session-Id) in addition to
+            # the SSE-specific headers; our headers take precedence.
+            sse_headers = {**response_headers, "Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+            return StreamingResponse(
+                sse_stream(),
+                status_code=status_code,
+                media_type="text/event-stream",
+                headers=sse_headers,
+            )
+        else:
+            try:
+                response_body = await upstream.aread()
+                response_body_str = response_body.decode(errors="replace")
+                try:
+                    resp_payload = json.loads(response_body_str)
+                    if rpc_id is None:
+                        rpc_id = resp_payload.get("id")
+                except Exception:
+                    pass
+                latency_ms = (time.monotonic() - start) * 1000
+                log_request(
+                    user=user,
+                    source_ip=source_ip,
+                    destination=destination,
+                    mcp_method=mcp_method,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    rpc_id=rpc_id,
+                    request_body=request_body_str,
+                    response_body=response_body_str,
+                )
+                return Response(
+                    content=response_body,
+                    status_code=status_code,
+                    headers=response_headers,
+                )
+            except Exception as exc:
+                latency_ms = (time.monotonic() - start) * 1000
+                log_request(
+                    user=user,
+                    source_ip=source_ip,
+                    destination=destination,
+                    mcp_method=mcp_method,
+                    status_code=status_code,
+                    latency_ms=latency_ms,
+                    error=str(exc),
+                    rpc_id=rpc_id,
+                    request_body=request_body_str,
+                )
+                return JSONResponse(
+                    status_code=502,
+                    content={"error": "Upstream read error"},
+                )
+            finally:
+                # Set before aclose so the outer finally sees client_released=True
+                # and does not attempt a double-close.
+                client_released = True
+                await upstream.aclose()
+                await client.aclose()
+                sem.release()
+
+    finally:
+        if not client_released:
+            await client.aclose()
+            sem.release()
+
+
+async def handle_streamable_http_get(
+    request: Request,
+    destination: str,
+) -> Response:
+    dest_config = get_destination(destination)
+    if dest_config is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Unknown destination: {destination}"},
+        )
+
+    if dest_config.type != "streamable_http":
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Destination '{destination}' is not a streamable_http type"},
+        )
+
+    upstream_url = dest_config.url
+    headers = _upstream_headers(request)
+    user = _user_from_request(request)
+    source_ip = _source_ip(request)
+    start = time.monotonic()
+
+    sem = _get_streamable_http_semaphore(destination)
+    await sem.acquire()
+
+    # Connect before returning so we can forward the actual upstream status code.
+    client = httpx.AsyncClient(timeout=_SSE_TIMEOUT)
+    client_released = False
+    try:
+        try:
+            upstream = await client.send(
+                client.build_request("GET", upstream_url, headers=headers),
+                stream=True,
+            )
+        except httpx.HTTPError as exc:
+            latency_ms = (time.monotonic() - start) * 1000
+            log_request(
+                user=user,
+                source_ip=source_ip,
+                destination=destination,
+                mcp_method=None,
+                status_code=502,
+                latency_ms=latency_ms,
+                error=str(exc),
+            )
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Upstream unreachable"},
+            )
+
+        status_code = upstream.status_code
+
+        # For non-2xx responses, read the body and return it directly so the
+        # client sees the real status code rather than always-200.
+        if status_code >= 400:
+            try:
+                error_body = await upstream.aread()
+            finally:
+                client_released = True
+                await upstream.aclose()
+                await client.aclose()
+                sem.release()
+            log_request(
+                user=user,
+                source_ip=source_ip,
+                destination=destination,
+                mcp_method=None,
+                status_code=status_code,
+                latency_ms=(time.monotonic() - start) * 1000,
+            )
+            return Response(content=error_body, status_code=status_code)
+
+        async def event_stream() -> AsyncIterator[bytes]:
+            error_msg: Optional[str] = None
+            try:
+                async for chunk in upstream.aiter_bytes():
+                    if len(chunk) > _MAX_CHUNK_BYTES:
+                        error_msg = f"Upstream chunk of {len(chunk)} bytes exceeds limit"
+                        _log.warning(
+                            "streamable_http GET: oversized chunk (%d bytes) from %s, closing stream",
+                            len(chunk), upstream_url,
+                        )
+                        yield (
+                            f"event: error\ndata: {json.dumps({'error': 'upstream chunk too large'})}\n\n"
+                        ).encode()
+                        break
+                    yield chunk
+            except httpx.HTTPError as exc:
+                error_msg = str(exc)
+                yield (
+                    f"event: error\ndata: {json.dumps({'error': 'upstream unavailable'})}\n\n"
+                ).encode()
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+                sem.release()
+                log_request(
+                    user=user,
+                    source_ip=source_ip,
+                    destination=destination,
+                    mcp_method=None,
+                    status_code=status_code,
+                    latency_ms=(time.monotonic() - start) * 1000,
+                    error=error_msg,
+                )
+
+        client_released = True  # generator owns cleanup from here
+        return StreamingResponse(
+            event_stream(),
+            status_code=status_code,
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    finally:
+        if not client_released:
+            await client.aclose()
+            sem.release()

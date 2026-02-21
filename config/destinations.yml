@@ -1,10 +1,15 @@
 # Destination name → upstream MCP server
-# The name becomes the URL path segment: GET /{name}/sse
+# The name becomes the URL path segment: GET /{name}/sse or POST /{name}/mcp
 #
-# --- SSE destination (remote HTTP server) ---
+# --- SSE destination (remote HTTP server, legacy MCP transport) ---
 # github:
 #   type: sse          # optional, 'sse' is the default
 #   url: https://mcp.example.com/github
+#
+# --- Streamable HTTP destination (remote HTTP server, modern MCP transport) ---
+# github:
+#   type: streamable_http
+#   url: https://api.githubcopilot.com/mcp
 #
 # --- stdio destination (local process) ---
 # context7:

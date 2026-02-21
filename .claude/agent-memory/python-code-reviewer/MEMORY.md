@@ -73,5 +73,25 @@ Minor anti-pattern. `json` is stdlib; move to top-level imports.
 5. `_stdin_writer` does not catch bare `OSError` — only `BrokenPipeError`, `ConnectionResetError`
 6. Unbounded stdin/stdout queues — memory risk on Pi under high load
 
+## Streamable HTTP Transport (added 2026-02-20, proxy.py lines 343–533)
+Three recurring patterns found in this new code:
+1. **try/finally splits variable binding from use** — `aread()` in a `try` block, then
+   `response_body.decode()` after the `finally`, causes `UnboundLocalError` if `aread()`
+   raises. Always keep post-read code inside the same `try` block.
+2. **Manual AsyncClient lifecycle instead of `async with`** — `client = httpx.AsyncClient()`
+   + explicit `aclose()` leaks on `CancelledError` and unexpected exceptions. Always use
+   `async with httpx.AsyncClient(...) as client:`.
+3. **`response_headers` computed but discarded in SSE branch** — headers like `Mcp-Session-Id`
+   are dropped when returning a `StreamingResponse` with a hardcoded headers dict. Pass
+   the full filtered `response_headers` to preserve upstream headers in both branches.
+
+Additional findings:
+- `_HOP_BY_HOP` frozenset is a good pattern but does not include `content-length`; the
+  existing `_upstream_headers` skip set does. Keep these two sets in sync.
+- GET SSE handler catches only `ConnectError`+`TimeoutException`; POST handler also catches
+  `RemoteProtocolError`. Both sides should be consistent.
+- `env` dict on `streamable_http` config is parsed and stored but never used — silent
+  security footgun if operators expect env keys to become request headers.
+
 ## See Also
 - `patterns.md` — detailed fix snippets for the retry loop

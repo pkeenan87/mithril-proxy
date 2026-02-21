@@ -59,6 +59,19 @@ destinations:
     url: https://mcp.example.com/github
 ```
 
+### Streamable HTTP destinations (remote HTTP server, modern MCP transport)
+
+Some upstream MCP servers (e.g. `https://api.githubcopilot.com/mcp`) use the newer Streamable HTTP transport — clients POST JSON-RPC directly to a single endpoint rather than opening an SSE channel first.
+
+```yaml
+destinations:
+  github:
+    type: streamable_http
+    url: https://api.githubcopilot.com/mcp
+```
+
+The proxy exposes `POST /{name}/mcp` and `GET /{name}/mcp`. Use `type: "http"` in your MCP client config and point it at `http://<pi-ip>:3000/<name>/mcp`.
+
 ### stdio destinations (local process)
 
 The proxy spawns a local subprocess and bridges its stdin/stdout as SSE. Each client connection gets its own subprocess instance.
@@ -167,7 +180,8 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
 {
   "mcpServers": {
     "github": {
-      "url": "http://192.168.1.10:3000/github/sse",
+      "type": "http",
+      "url": "http://192.168.1.10:3000/github/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_UPSTREAM_TOKEN_HERE"
       }
@@ -180,13 +194,16 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
 }
 ```
 
+> **Note:** Use `"type": "http"` (not `"sse"`) for `streamable_http` destinations. The URL ends in `/mcp`, not `/sse`.
+
 ### Cursor (`.cursor/mcp.json`)
 
 ```json
 {
   "mcpServers": {
     "github": {
-      "url": "http://192.168.1.10:3000/github/sse",
+      "type": "http",
+      "url": "http://192.168.1.10:3000/github/mcp",
       "headers": {
         "Authorization": "Bearer YOUR_UPSTREAM_TOKEN_HERE"
       }
@@ -206,6 +223,11 @@ For **stdio destinations**, the API key is injected by the proxy from `secrets.y
 1. Add the entry to `/etc/mithril-proxy/destinations.yml`
 2. Restart: `sudo systemctl restart mithril-proxy`
 3. Point your client to `http://<pi-ip>:3000/<name>/sse` with an `Authorization` header
+
+**Streamable HTTP destination:**
+1. Add the entry to `/etc/mithril-proxy/destinations.yml` with `type: streamable_http` and `url:`
+2. Restart: `sudo systemctl restart mithril-proxy`
+3. Point your MCP client to `http://<pi-ip>:3000/<name>/mcp` with `type: http` in the client config and an `Authorization` header
 
 **stdio destination (e.g. an npm MCP server):**
 1. Add the entry to `/etc/mithril-proxy/destinations.yml` with `type: stdio` and `command:`
@@ -306,6 +328,9 @@ By default the proxy writes the full request and response JSON-RPC payloads to t
 AUDIT_LOG_BODIES=false
 ```
 With this flag set, `request_body` and `response_body` fields are omitted from every log line. The `rpc_id`, `mcp_method`, and all other fields are still logged.
+
+**405 on `POST /…/sse`**
+The upstream server uses the Streamable HTTP transport, not the legacy SSE transport. Change the destination to `type: streamable_http` in `destinations.yml` and update your MCP client to use `"type": "http"` with URL ending in `/mcp` instead of `/sse`.
 
 **Port 3000 already in use**
 Edit the `ExecStart` line in `/etc/systemd/system/mithril-proxy.service` to use a different port, then:

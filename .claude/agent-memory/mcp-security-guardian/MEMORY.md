@@ -91,6 +91,38 @@
 ### Duplicate import line in proxy.py
 - proxy.py lines 15-16 import `get_destination, get_destination_url` twice.
 
+## Confirmed Vulnerability Patterns (streamable_http transport, 2026-02-20)
+
+### httpx.AsyncClient resource leak on unexpected exceptions
+- `handle_streamable_http_post` (proxy.py:387): `client = httpx.AsyncClient(...)` created
+  before try/except. Only 3 exception types release it; any other exception leaks the client
+  and upstream TCP connection. Pattern: wrap the full client lifetime in try/finally.
+
+### 502 detail re-introduced in streamable_http POST handler
+- proxy.py:409: `"detail": str(exc)` leaks upstream hostname and OS socket error text.
+  Same issue as handle_message; must be gated on a dev-mode env flag.
+
+### set-cookie forwarded from upstream JSON response to client
+- proxy.py:414-416: `_HOP_BY_HOP` frozenset omits `set-cookie`, `www-authenticate`.
+  On the JSON (non-SSE) path, full upstream response headers including set-cookie are
+  forwarded. SSE path accidentally avoids this (discards response_headers). Fix: add
+  set-cookie, www-authenticate, proxy-authenticate to the strip set.
+
+### No concurrency cap on streamable_http connections
+- Each POST and GET /mcp call creates a new httpx.AsyncClient with no semaphore or counter.
+  GET handler uses timeout=None — connections held indefinitely. DoS via N concurrent GETs.
+  Pattern: per-destination asyncio.Semaphore with same _MAX_CONNECTIONS_PER_DEST constant.
+
+### URL scheme not validated at config load for streamable_http
+- config.py:107-117: only checks non-empty string. file://, http://localhost/admin, and
+  RFC-1918 addresses accepted. Pattern: urlparse + scheme allowlist {"http","https"} at
+  config load time; optionally a host allowlist.
+
+### try/finally around aread() swallows error log
+- proxy.py:445-449: if upstream.aread() raises, finally closes connections but log_request
+  is never called — unhandled exception surfaces as 500 with no structured log record.
+  Pattern: initialise response_body=b"" before try; move log_request into finally.
+
 ## Patterns To Reuse
 
 - Always validate session IDs against a strict regex `^[A-Za-z0-9_-]{8,128}$` before
