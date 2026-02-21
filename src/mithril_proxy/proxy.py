@@ -140,10 +140,15 @@ async def handle_sse(request: Request, destination: str) -> Response:
         )
 
     if dest_config.type == "stdio":
-        from .bridge import handle_stdio_sse
-        from .secrets import get_destination_env
-        subprocess_env = {**dest_config.env, **get_destination_env(destination)}
-        return await handle_stdio_sse(request, destination, dest_config, subprocess_env)
+        return JSONResponse(
+            status_code=410,
+            content={
+                "error": (
+                    "stdio destinations use POST /mcp. "
+                    "GET /sse is no longer supported."
+                )
+            },
+        )
 
     upstream_base = dest_config.url
 
@@ -272,8 +277,15 @@ async def handle_message(
         )
 
     if dest_config.type == "stdio":
-        from .bridge import handle_stdio_message
-        return await handle_stdio_message(request, destination, session_id)
+        return JSONResponse(
+            status_code=410,
+            content={
+                "error": (
+                    "stdio destinations use POST /mcp. "
+                    "POST /message is no longer supported."
+                )
+            },
+        )
 
     upstream_url = await _get_session_url(session_id)
     if upstream_url is None:
@@ -391,10 +403,17 @@ async def handle_streamable_http_post(
             content={"error": f"Unknown destination: {destination}"},
         )
 
-    if dest_config.type != "streamable_http":
+    if dest_config.type == "stdio":
+        from .bridge import handle_stdio_streamable_http_post
+        from .secrets import get_destination_env
+        subprocess_env = {**dest_config.env, **get_destination_env(destination)}
+        return await handle_stdio_streamable_http_post(
+            request, destination, dest_config, subprocess_env
+        )
+    elif dest_config.type != "streamable_http":
         return JSONResponse(
             status_code=400,
-            content={"error": f"Destination '{destination}' is not a streamable_http type"},
+            content={"error": f"Destination '{destination}' does not support POST /mcp"},
         )
 
     upstream_url = dest_config.url
@@ -562,6 +581,80 @@ async def handle_streamable_http_post(
             sem.release()
 
 
+async def handle_streamable_http_delete(
+    request: Request,
+    destination: str,
+) -> Response:
+    """Handle ``DELETE /{destination}/mcp``.
+
+    For stdio destinations: remove the session via the bridge handler.
+    For streamable_http destinations: forward DELETE to the upstream server.
+    """
+    dest_config = get_destination(destination)
+    if dest_config is None:
+        return JSONResponse(
+            status_code=404,
+            content={"error": f"Unknown destination: {destination}"},
+        )
+
+    if dest_config.type == "stdio":
+        from .bridge import handle_stdio_streamable_http_delete
+        from .secrets import get_destination_env
+        subprocess_env = {**dest_config.env, **get_destination_env(destination)}
+        return await handle_stdio_streamable_http_delete(
+            request, destination, dest_config, subprocess_env
+        )
+
+    if dest_config.type == "streamable_http":
+        upstream_url = dest_config.url
+        headers = _upstream_headers(request)
+        user = _user_from_request(request)
+        source_ip = _source_ip(request)
+        start = time.monotonic()
+        status_code = 502
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                upstream_response = await client.delete(upstream_url, headers=headers)
+                status_code = upstream_response.status_code
+                response_body = upstream_response.content
+                response_headers = {
+                    k: v
+                    for k, v in upstream_response.headers.items()
+                    if k.lower() not in _HOP_BY_HOP
+                }
+        except httpx.HTTPError as exc:
+            log_request(
+                user=user,
+                source_ip=source_ip,
+                destination=destination,
+                mcp_method=None,
+                status_code=502,
+                latency_ms=(time.monotonic() - start) * 1000,
+                error=str(exc),
+            )
+            return JSONResponse(
+                status_code=502,
+                content={"error": "Upstream unreachable"},
+            )
+        log_request(
+            user=user,
+            source_ip=source_ip,
+            destination=destination,
+            mcp_method=None,
+            status_code=status_code,
+            latency_ms=(time.monotonic() - start) * 1000,
+        )
+        return Response(
+            content=response_body,
+            status_code=status_code,
+            headers=response_headers,
+        )
+
+    return JSONResponse(
+        status_code=400,
+        content={"error": f"Destination '{destination}' does not support DELETE /mcp"},
+    )
+
 async def handle_streamable_http_get(
     request: Request,
     destination: str,
@@ -573,10 +666,17 @@ async def handle_streamable_http_get(
             content={"error": f"Unknown destination: {destination}"},
         )
 
-    if dest_config.type != "streamable_http":
+    if dest_config.type == "stdio":
+        from .bridge import handle_stdio_streamable_http_get
+        from .secrets import get_destination_env
+        subprocess_env = {**dest_config.env, **get_destination_env(destination)}
+        return await handle_stdio_streamable_http_get(
+            request, destination, dest_config, subprocess_env
+        )
+    elif dest_config.type != "streamable_http":
         return JSONResponse(
             status_code=400,
-            content={"error": f"Destination '{destination}' is not a streamable_http type"},
+            content={"error": f"Destination '{destination}' does not support GET /mcp"},
         )
 
     upstream_url = dest_config.url

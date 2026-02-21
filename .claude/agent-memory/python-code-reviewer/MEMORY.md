@@ -93,5 +93,22 @@ Additional findings:
 - `env` dict on `streamable_http` config is parsed and stored but never used — silent
   security footgun if operators expect env keys to become request headers.
 
+## stdio Streamable HTTP Bridge (added 2026-02-21, bridge.py full rewrite)
+Per-destination shared subprocess. `pending` maps internal monotonic int id → (future, original_id).
+`_counter += 1` is safe without a lock (asyncio single-threaded; no await between read and write).
+`asyncio.Lock` in dataclass default_factory: creating the lock outside a loop on Python 3.9 does NOT
+raise — error only occurs on first `.acquire()`. Safe in practice because dataclass is constructed
+inside a request handler (always inside the event loop). Bridge module is never imported at cold start
+before `asyncio.run()`.
+OSError path pops future from pending but does NOT cancel it — safe (no other coroutine holds a ref).
+`bridge.process.wait()` after process already waited is idempotent — safe.
+`_SENTINEL` object (bridge.py line 67) is confirmed dead code; comment says "backward compatibility".
+DELETE does not validate UUID4 format — safe in practice (non-UUID cannot match a session) but inconsistent.
+`STDIO_RESPONSE_TIMEOUT_SECS` at module import: tests must monkeypatch the module-level name directly.
+`shutdown_all_stdio` does not cancel stdout_task/stderr_task — they exit naturally on process termination.
+The PytestUnraisableExceptionWarning from BaseSubprocessTransport.__del__ is a test teardown artifact on
+Python 3.9; the reset_bridge_state fixture terminates processes but the event loop closes before the
+transport GC runs. Not a production issue.
+
 ## See Also
 - `patterns.md` — detailed fix snippets for the retry loop
