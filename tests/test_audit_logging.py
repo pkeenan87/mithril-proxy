@@ -110,15 +110,16 @@ def app(tmp_log, tmp_path):
 class TestLogRequestAuditFields:
     def test_request_body_present_when_provided(self, setup_logger, tmp_log):
         import mithril_proxy.logger as log_mod
-        log_mod.log_request(
-            user="anon",
-            source_ip="127.0.0.1",
-            destination="testdest",
-            mcp_method="tools/list",
-            status_code=200,
-            latency_ms=1.0,
-            request_body='{"jsonrpc":"2.0","method":"tools/list","id":1}',
-        )
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            log_mod.log_request(
+                user="anon",
+                source_ip="127.0.0.1",
+                destination="testdest",
+                mcp_method="tools/list",
+                status_code=200,
+                latency_ms=1.0,
+                request_body='{"jsonrpc":"2.0","method":"tools/list","id":1}',
+            )
         lines = _read_log_lines(tmp_log)
         assert len(lines) == 1
         assert "request_body" in lines[0]
@@ -126,15 +127,16 @@ class TestLogRequestAuditFields:
 
     def test_response_body_present_when_provided(self, setup_logger, tmp_log):
         import mithril_proxy.logger as log_mod
-        log_mod.log_request(
-            user="anon",
-            source_ip="127.0.0.1",
-            destination="testdest",
-            mcp_method=None,
-            status_code=200,
-            latency_ms=1.0,
-            response_body='{"jsonrpc":"2.0","result":{"tools":[]},"id":1}',
-        )
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            log_mod.log_request(
+                user="anon",
+                source_ip="127.0.0.1",
+                destination="testdest",
+                mcp_method=None,
+                status_code=200,
+                latency_ms=1.0,
+                response_body='{"jsonrpc":"2.0","result":{"tools":[]},"id":1}',
+            )
         lines = _read_log_lines(tmp_log)
         assert "response_body" in lines[0]
         assert "tools" in lines[0]["response_body"]
@@ -190,15 +192,16 @@ class TestTruncation:
         import mithril_proxy.logger as log_mod
 
         large_body = "x" * 40_000  # 40 KB > 32 KB limit
-        log_mod.log_request(
-            user="anon",
-            source_ip="127.0.0.1",
-            destination="testdest",
-            mcp_method=None,
-            status_code=200,
-            latency_ms=1.0,
-            request_body=large_body,
-        )
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            log_mod.log_request(
+                user="anon",
+                source_ip="127.0.0.1",
+                destination="testdest",
+                mcp_method=None,
+                status_code=200,
+                latency_ms=1.0,
+                request_body=large_body,
+            )
         lines = _read_log_lines(tmp_log)
         entry = lines[0]
         assert entry.get("truncated") is True
@@ -208,15 +211,16 @@ class TestTruncation:
         import mithril_proxy.logger as log_mod
 
         large_body = "y" * 40_000
-        log_mod.log_request(
-            user="anon",
-            source_ip="127.0.0.1",
-            destination="testdest",
-            mcp_method=None,
-            status_code=200,
-            latency_ms=1.0,
-            response_body=large_body,
-        )
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            log_mod.log_request(
+                user="anon",
+                source_ip="127.0.0.1",
+                destination="testdest",
+                mcp_method=None,
+                status_code=200,
+                latency_ms=1.0,
+                response_body=large_body,
+            )
         lines = _read_log_lines(tmp_log)
         entry = lines[0]
         assert entry.get("truncated") is True
@@ -226,15 +230,16 @@ class TestTruncation:
         import mithril_proxy.logger as log_mod
 
         exact_body = "z" * 32_768
-        log_mod.log_request(
-            user="anon",
-            source_ip="127.0.0.1",
-            destination="testdest",
-            mcp_method=None,
-            status_code=200,
-            latency_ms=1.0,
-            request_body=exact_body,
-        )
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            log_mod.log_request(
+                user="anon",
+                source_ip="127.0.0.1",
+                destination="testdest",
+                mcp_method=None,
+                status_code=200,
+                latency_ms=1.0,
+                request_body=exact_body,
+            )
         lines = _read_log_lines(tmp_log)
         entry = lines[0]
         assert "truncated" not in entry
@@ -284,12 +289,10 @@ class TestAuditToggle:
         lines = _read_log_lines(tmp_log)
         assert "request_body" not in lines[0]
 
-    def test_audit_enabled_by_default(self, setup_logger, tmp_log):
+    def test_audit_enabled_when_set_to_true(self, setup_logger, tmp_log):
         import mithril_proxy.logger as log_mod
 
-        # Ensure no override is set
-        env = {k: v for k, v in __import__("os").environ.items() if k != "AUDIT_LOG_BODIES"}
-        with patch.dict("os.environ", env, clear=True):
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
             log_mod.log_request(
                 user="anon",
                 source_ip="127.0.0.1",
@@ -324,11 +327,12 @@ class TestSseProxyAuditLogging:
             mock_conn.return_value = mock_response
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                await client.post(
-                    f"/testdest/message?session_id={session_id}",
-                    content=b'{"jsonrpc":"2.0","method":"tools/list","id":7}',
-                    headers={"Content-Type": "application/json"},
-                )
+                with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                    await client.post(
+                        f"/testdest/message?session_id={session_id}",
+                        content=b'{"jsonrpc":"2.0","method":"tools/list","id":7}',
+                        headers={"Content-Type": "application/json"},
+                    )
 
         await proxy._remove_session(session_id)
 
@@ -356,11 +360,12 @@ class TestSseProxyAuditLogging:
             mock_conn.return_value = mock_response
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-                await client.post(
-                    f"/testdest/message?session_id={session_id}",
-                    content=b'{"jsonrpc":"2.0","method":"tools/list","id":7}',
-                    headers={"Content-Type": "application/json"},
-                )
+                with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                    await client.post(
+                        f"/testdest/message?session_id={session_id}",
+                        content=b'{"jsonrpc":"2.0","method":"tools/list","id":7}',
+                        headers={"Content-Type": "application/json"},
+                    )
 
         await proxy._remove_session(session_id)
 
@@ -416,11 +421,12 @@ class TestSseProxyAuditLogging:
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 # Send raw binary that is not valid JSON
-                resp = await client.post(
-                    f"/testdest/message?session_id={session_id}",
-                    content=b"not valid json at all",
-                    headers={"Content-Type": "application/octet-stream"},
-                )
+                with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                    resp = await client.post(
+                        f"/testdest/message?session_id={session_id}",
+                        content=b"not valid json at all",
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
             assert resp.status_code == 202
 
         await proxy._remove_session(session_id)
@@ -459,7 +465,8 @@ class TestStdioAuditLogging:
         request.client = MagicMock()
         request.client.host = "127.0.0.1"
 
-        resp = await handle_stdio_streamable_http_post(request, "testdest", dest_config, {})
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            resp = await handle_stdio_streamable_http_post(request, "testdest", dest_config, {})
         assert resp.status_code == 200
 
         lines = _read_log_lines(tmp_log)
@@ -501,7 +508,8 @@ class TestStdioAuditLogging:
 
         dest_config = DestinationConfig(type="stdio", command="python3 --version")
         with patch("mithril_proxy.bridge._RETRY_DELAYS", []):
-            await _stdio_stdout_reader(bridge, dest_config, {})
+            with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                await _stdio_stdout_reader(bridge, dest_config, {})
 
         log_lines = _read_log_lines(tmp_log)
         response_entries = [l for l in log_lines if "response_body" in l]
@@ -546,7 +554,8 @@ class TestStdioAuditLogging:
 
         dest_config = DestinationConfig(type="stdio", command="python3 --version")
         with patch("mithril_proxy.bridge._RETRY_DELAYS", []):
-            await _stdio_stdout_reader(bridge, dest_config, {})
+            with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                await _stdio_stdout_reader(bridge, dest_config, {})
 
         log_lines = _read_log_lines(tmp_log)
         response_entries = [l for l in log_lines if "response_body" in l]
@@ -621,3 +630,81 @@ class TestStdioAuditLogging:
         post_entries = [l for l in dest_entries if l.get("mcp_method") == "tools/list"]
         assert post_entries
         assert post_entries[-1].get("rpc_id") == 1
+
+
+# --------------------------------------------------------------------------- #
+# TestFieldExclusion — field-level exclusion and header logging
+# --------------------------------------------------------------------------- #
+
+class TestFieldExclusion:
+    def _log(self, log_mod, tmp_log, **kwargs):
+        log_mod.log_request(
+            user="anon",
+            source_ip="127.0.0.1",
+            destination="testdest",
+            mcp_method=None,
+            status_code=200,
+            latency_ms=1.0,
+            **kwargs,
+        )
+        return _read_log_lines(tmp_log)[0]
+
+    def test_default_exclusion_drops_sensitive_fields(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        body = '{"authorization":"Bearer secret","method":"tools/list"}'
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}, clear=False):
+            entry = self._log(log_mod, tmp_log, request_body=body)
+        assert "request_body" in entry
+        assert "authorization" not in entry["request_body"].lower()
+        assert "tools/list" in entry["request_body"]
+
+    def test_custom_exclusion_drops_specified_fields(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        body = '{"foo":"sensitive","bar":"also-sensitive","safe":"keep"}'
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true", "EXCLUDED_LOG_FIELDS": "foo,bar"}):
+            entry = self._log(log_mod, tmp_log, request_body=body)
+        assert "foo" not in entry["request_body"]
+        assert "bar" not in entry["request_body"]
+        assert "keep" in entry["request_body"]
+
+    def test_empty_exclusion_logs_all_fields(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        body = '{"authorization":"Bearer token","method":"ping"}'
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true", "EXCLUDED_LOG_FIELDS": ""}):
+            entry = self._log(log_mod, tmp_log, request_body=body)
+        assert "authorization" in entry["request_body"]
+
+    def test_exclusion_is_case_insensitive(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        body = '{"Authorization":"Bearer token","method":"ping"}'
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}, clear=False):
+            entry = self._log(log_mod, tmp_log, request_body=body)
+        assert "Authorization" not in entry["request_body"]
+        assert "ping" in entry["request_body"]
+
+    def test_headers_omitted_by_default(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        with patch.dict("os.environ", {}, clear=False):
+            entry = self._log(log_mod, tmp_log, request_headers={"Authorization": "Bearer x", "content-type": "application/json"})
+        assert "request_headers" not in entry
+
+    def test_headers_included_when_flag_set(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        with patch.dict("os.environ", {"AUDIT_LOG_HEADERS": "true"}):
+            entry = self._log(log_mod, tmp_log, request_headers={"content-type": "application/json"})
+        assert "request_headers" in entry
+        assert entry["request_headers"].get("content-type") == "application/json"
+
+    def test_excluded_fields_absent_from_headers(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        with patch.dict("os.environ", {"AUDIT_LOG_HEADERS": "true"}):
+            entry = self._log(log_mod, tmp_log, request_headers={"Authorization": "Bearer secret", "content-type": "application/json"})
+        assert "request_headers" in entry
+        assert "Authorization" not in entry["request_headers"]
+        assert "content-type" in entry["request_headers"]
+
+    def test_non_json_body_logged_as_is(self, setup_logger, tmp_log):
+        import mithril_proxy.logger as log_mod
+        with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+            entry = self._log(log_mod, tmp_log, request_body="not valid json")
+        assert entry["request_body"] == "not valid json"

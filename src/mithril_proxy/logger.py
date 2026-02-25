@@ -14,7 +14,13 @@ _LOG_FILE_ENV = "LOG_FILE"
 _DEFAULT_LOG_FILE = Path("/var/log/mithril-proxy/proxy.log")
 
 _AUDIT_LOG_BODIES_ENV = "AUDIT_LOG_BODIES"
+_AUDIT_LOG_HEADERS_ENV = "AUDIT_LOG_HEADERS"
+_EXCLUDED_LOG_FIELDS_ENV = "EXCLUDED_LOG_FIELDS"
 _AUDIT_MAX_BYTES = 32_768  # 32 KB
+
+_DEFAULT_EXCLUDED_FIELDS: frozenset = frozenset({
+    "authorization", "x-api-key", "api_key", "token", "secret", "password",
+})
 
 # Thread lock so concurrent requests don't interleave JSON lines
 _write_lock = threading.Lock()
@@ -50,7 +56,24 @@ class _JsonFormatter(logging.Formatter):
 
 
 def _audit_enabled() -> bool:
-    return os.environ.get(_AUDIT_LOG_BODIES_ENV, "true").lower() not in ("false", "0", "no")
+    return os.environ.get(_AUDIT_LOG_BODIES_ENV, "false").lower() not in ("false", "0", "no")
+
+
+def _headers_enabled() -> bool:
+    return os.environ.get(_AUDIT_LOG_HEADERS_ENV, "false").lower() not in ("false", "0", "no")
+
+
+def _excluded_fields() -> frozenset:
+    raw = os.environ.get(_EXCLUDED_LOG_FIELDS_ENV)
+    if raw is None:
+        return _DEFAULT_EXCLUDED_FIELDS
+    if raw.strip() == "":
+        return frozenset()
+    return frozenset(token.strip().lower() for token in raw.split(",") if token.strip())
+
+
+def _filter_dict(data: dict, excluded: frozenset) -> dict:
+    return {k: v for k, v in data.items() if k.lower() not in excluded}
 
 
 def _resolve_log_path() -> Path:
@@ -95,6 +118,7 @@ def log_request(
     rpc_id=None,
     request_body: Optional[str] = None,
     response_body: Optional[str] = None,
+    request_headers: Optional[dict] = None,
     detection_action: Optional[str] = None,
     detection_engine: Optional[str] = None,
     detection_detail: Optional[str] = None,
@@ -123,13 +147,29 @@ def log_request(
         extra["detection_detail"] = detection_detail[:_AUDIT_MAX_BYTES]
 
     if _audit_enabled():
+        excluded = _excluded_fields()
         for field_name, value in (("request_body", request_body), ("response_body", response_body)):
             if value is not None:
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, dict):
+                        filtered = _filter_dict(parsed, excluded)
+                        if not filtered:
+                            continue
+                        value = json.dumps(filtered, separators=(",", ":"))
+                except (json.JSONDecodeError, ValueError):
+                    pass
                 if len(value) > _AUDIT_MAX_BYTES:
                     extra[field_name] = value[:_AUDIT_MAX_BYTES]
                     extra["truncated"] = True
                 else:
                     extra[field_name] = value
+
+    if _headers_enabled() and request_headers is not None:
+        excluded = _excluded_fields()
+        filtered_headers = _filter_dict(dict(request_headers), excluded)
+        if filtered_headers:
+            extra["request_headers"] = filtered_headers
 
     with _write_lock:
         logger.info("request", extra=extra)

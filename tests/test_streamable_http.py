@@ -173,10 +173,11 @@ class TestMcpPostJsonResponse:
 
         with patch("mithril_proxy.proxy.httpx.AsyncClient", return_value=mock_client):
             async with test_client:
-                await test_client.post(
-                    "/mcpdest/mcp",
-                    json={"jsonrpc": "2.0", "method": "tools/list", "id": 42},
-                )
+                with patch.dict("os.environ", {"AUDIT_LOG_BODIES": "true"}):
+                    await test_client.post(
+                        "/mcpdest/mcp",
+                        json={"jsonrpc": "2.0", "method": "tools/list", "id": 42},
+                    )
 
         lines = _read_log_lines(tmp_log)
         assert lines, "Expected at least one log line"
